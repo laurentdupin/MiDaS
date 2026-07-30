@@ -1,5 +1,10 @@
 ## Towards Robust Monocular Depth Estimation: Mixing Datasets for Zero-shot Cross-dataset Transfer
 
+> **Native inference work:** `native/` contains the dependency-free C ABI and
+> bounded derived-model foundation for `midas_v21_small_256`. It deliberately
+> advertises no inference/GPU capability until the EfficientNet-Lite3 graph
+> passes PyTorch CPU parity. See `native/validation/README.md`.
+
 This repository contains code to compute depth from a single image. It accompanies our [paper](https://arxiv.org/abs/1907.01341v3):
 
 >Towards Robust Monocular Depth Estimation: Mixing Datasets for Zero-shot Cross-dataset Transfer  
