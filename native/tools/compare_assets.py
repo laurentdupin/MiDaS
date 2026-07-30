@@ -70,6 +70,17 @@ def configure_dll(path: Path):
         ctypes.c_uint64,
     ]
     dll.midas_infer_bgr8.restype = ctypes.c_int
+    dll.midas_inferbridge_bgra8_u8.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.c_int64,
+        ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.c_uint64,
+    ]
+    dll.midas_inferbridge_bgra8_u8.restype = ctypes.c_int
     dll.midas_last_error.restype = ctypes.c_char_p
     return dll
 
@@ -99,6 +110,11 @@ def main() -> None:
     parser.add_argument(
         "--backend", choices=("cpu", "vulkan"), default="cpu")
     parser.add_argument("--device", type=int, default=0)
+    parser.add_argument(
+        "--contract",
+        choices=("official", "inferbridge"),
+        default="official",
+    )
     args = parser.parse_args()
 
     reference_model = load_reference(
@@ -120,45 +136,76 @@ def main() -> None:
             if bgr is None:
                 raise RuntimeError(f"cannot decode {path}")
             height, width = bgr.shape[:2]
-            native = np.empty((height, width), dtype=np.float32)
-            status = dll.midas_infer_bgr8(
-                context.value,
-                bgr.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-                width,
-                height,
-                bgr.strides[0],
-                args.input_size,
-                native.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-                native.size,
-            )
-            if status:
-                raise RuntimeError(dll.midas_last_error().decode())
-
             network_width, network_height = network_size(
                 width, height, args.input_size
             )
-            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB) / 255.0
-            rgb = cv2.resize(
-                rgb,
+            inferbridge = args.contract == "inferbridge"
+            image = (
+                bgr.astype(np.float64) / 255.0
+                if inferbridge
+                else cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB) / 255.0
+            )
+            image = cv2.resize(
+                image,
                 (network_width, network_height),
                 interpolation=cv2.INTER_CUBIC,
             )
-            rgb = (
-                rgb - np.array([0.485, 0.456, 0.406])
+            image = (
+                image - np.array([0.485, 0.456, 0.406])
             ) / np.array([0.229, 0.224, 0.225])
             tensor = torch.from_numpy(
-                np.transpose(rgb, (2, 0, 1)).astype(np.float32)
+                np.transpose(image, (2, 0, 1)).astype(np.float32)
             ).unsqueeze(0)
             with torch.inference_mode():
                 reference = reference_model(tensor)
-                reference = torch.nn.functional.interpolate(
-                    reference.unsqueeze(1),
-                    size=(height, width),
-                    mode="bicubic",
-                    align_corners=False,
-                )[0, 0].numpy()
+                if inferbridge:
+                    reference = reference[0].numpy()
+                    reference = (
+                        (reference - reference.min()) /
+                        (reference.max() - reference.min()) * 255.0
+                    ).astype(np.uint8)
+                else:
+                    reference = torch.nn.functional.interpolate(
+                        reference.unsqueeze(1),
+                        size=(height, width),
+                        mode="bicubic",
+                        align_corners=False,
+                    )[0, 0].numpy()
 
-            difference = np.abs(native - reference)
+            if inferbridge:
+                bgra = cv2.cvtColor(bgr, cv2.COLOR_BGR2BGRA)
+                native = np.empty(
+                    (network_height, network_width), dtype=np.uint8)
+                status = dll.midas_inferbridge_bgra8_u8(
+                    context.value,
+                    bgra.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+                    width,
+                    height,
+                    bgra.strides[0],
+                    args.input_size,
+                    native.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+                    native.size,
+                )
+            else:
+                native = np.empty((height, width), dtype=np.float32)
+                status = dll.midas_infer_bgr8(
+                    context.value,
+                    bgr.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+                    width,
+                    height,
+                    bgr.strides[0],
+                    args.input_size,
+                    native.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                    native.size,
+                )
+            if status:
+                raise RuntimeError(dll.midas_last_error().decode())
+
+            difference = np.abs(
+                native.astype(np.int16) - reference.astype(np.int16)
+                if inferbridge
+                else native - reference
+            )
             denominator = np.abs(reference, dtype=np.float64).sum()
             row = {
                 "image": path.as_posix(),
@@ -174,6 +221,9 @@ def main() -> None:
                     else 0.0
                 ),
             }
+            if inferbridge:
+                row["mismatch_fraction"] = float(
+                    np.count_nonzero(difference) / difference.size)
             rows.append(row)
             print(
                 f"[{index:02d}/{len(paths)}] {path.name}: "

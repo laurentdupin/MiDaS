@@ -52,13 +52,17 @@ endif()
 
 add_library(midas_native SHARED
     src/midas_native.cpp
+    src/inferbridge_harness.cpp
     src/cpu_executor.cpp
     src/image.cpp
     src/model.cpp)
 target_include_directories(midas_native
     PUBLIC include
     PRIVATE src)
-target_compile_definitions(midas_native PRIVATE MIDAS_BUILD_DLL)
+target_compile_definitions(
+    midas_native PRIVATE
+        MIDAS_BUILD_DLL
+        INFERBRIDGE_HARNESS_BUILDING_LIBRARY)
 target_compile_definitions(midas_native PRIVATE
     $<$<BOOL:${MIDAS_WITH_VULKAN}>:MIDAS_WITH_VULKAN=1>)
 set_target_properties(midas_native PROPERTIES
@@ -103,6 +107,26 @@ if(BUILD_TESTING)
     target_link_libraries(midas_c_abi_smoke PRIVATE midas_native)
     target_include_directories(midas_c_abi_smoke PRIVATE include)
     add_test(NAME midas_c_abi_smoke COMMAND midas_c_abi_smoke)
+    add_executable(
+        midas_harness_abi_smoke tests/harness_abi_smoke.c)
+    target_link_libraries(
+        midas_harness_abi_smoke PRIVATE midas_native)
+    target_include_directories(
+        midas_harness_abi_smoke PRIVATE include)
+    add_test(
+        NAME midas_harness_abi_smoke
+        COMMAND midas_harness_abi_smoke)
+    add_executable(
+        midas_harness_full_graph tests/harness_full_graph.cpp)
+    target_link_libraries(
+        midas_harness_full_graph PRIVATE midas_native)
+    target_include_directories(
+        midas_harness_full_graph PRIVATE include)
+    add_test(
+        NAME midas_harness_full_graph
+        COMMAND midas_harness_full_graph)
+    set_tests_properties(
+        midas_harness_full_graph PROPERTIES SKIP_RETURN_CODE 77)
 
     add_executable(midas_image_tests
         tests/image_tests.cpp

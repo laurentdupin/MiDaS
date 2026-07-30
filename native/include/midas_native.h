@@ -19,7 +19,7 @@
 extern "C" {
 #endif
 
-#define MIDAS_ABI_VERSION 1u
+#define MIDAS_ABI_VERSION 2u
 
 typedef struct midas_context midas_context;
 
@@ -89,6 +89,21 @@ MIDAS_API midas_status MIDAS_CALL midas_infer_bgr8(
     int64_t stride_bytes,
     int32_t input_size,
     float* depth,
+    uint64_t depth_elements);
+/*
+ * Exact InferBridge MiDaS Small worker boundary. Input is a BGRA8 capture;
+ * the first three bytes retain their BGR ordering as model channels. Output
+ * is min/max-normalized uint8 depth at midas_get_network_shape dimensions,
+ * matching the Python worker (no resize back to the capture dimensions).
+ */
+MIDAS_API midas_status MIDAS_CALL midas_inferbridge_bgra8_u8(
+    midas_context* context,
+    const uint8_t* bgra,
+    int32_t width,
+    int32_t height,
+    int64_t stride_bytes,
+    int32_t input_size,
+    uint8_t* depth,
     uint64_t depth_elements);
 MIDAS_API midas_status MIDAS_CALL midas_infer_tensor_f32(
     midas_context* context,

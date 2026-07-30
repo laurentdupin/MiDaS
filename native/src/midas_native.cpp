@@ -20,6 +20,7 @@ struct midas_context {
     std::unique_ptr<midas_native::VulkanExecutor> vulkan_executor;
 #endif
     midas_native::ImageScratch image_scratch;
+    std::vector<std::uint8_t> packed_capture;
     std::vector<float> network_input;
     std::vector<float> network_depth;
 
@@ -250,6 +251,85 @@ midas_status MIDAS_CALL midas_infer_bgr8(
             network,
             depth,
             {width, height});
+    });
+}
+
+midas_status MIDAS_CALL midas_inferbridge_bgra8_u8(
+    midas_context* context,
+    const uint8_t* bgra,
+    int32_t width,
+    int32_t height,
+    int64_t stride_bytes,
+    int32_t input_size,
+    uint8_t* depth,
+    uint64_t depth_elements) {
+    if (context == nullptr || bgra == nullptr || depth == nullptr ||
+        width <= 0 || height <= 0 ||
+        stride_bytes < int64_t(width) * 4 || input_size <= 0) {
+        return fail(
+            MIDAS_STATUS_INVALID_ARGUMENT,
+            "invalid InferBridge BGRA8 inference input");
+    }
+    return protect([&] {
+        const midas_native::ImageShape network =
+            midas_native::network_shape(width, height, input_size);
+        const std::uint64_t network_elements =
+            std::uint64_t(network.width) * network.height;
+        if (depth_elements < network_elements) {
+            throw std::invalid_argument(
+                "InferBridge depth output is too small");
+        }
+        context->packed_capture.resize(
+            static_cast<std::size_t>(
+                std::uint64_t(width) * height * 3u));
+        for (int y = 0; y < height; ++y) {
+            const std::uint8_t* source =
+                bgra + static_cast<std::int64_t>(y) * stride_bytes;
+            std::uint8_t* destination =
+                context->packed_capture.data() +
+                static_cast<std::size_t>(y) * width * 3u;
+            for (int x = 0; x < width; ++x) {
+                // preprocess_bgr8 swaps BGR to RGB. Reversing here preserves
+                // the worker's first-three-byte BGR-as-model-channel quirk.
+                destination[static_cast<std::size_t>(x) * 3u] =
+                    source[static_cast<std::size_t>(x) * 4u + 2u];
+                destination[static_cast<std::size_t>(x) * 3u + 1u] =
+                    source[static_cast<std::size_t>(x) * 4u + 1u];
+                destination[static_cast<std::size_t>(x) * 3u + 2u] =
+                    source[static_cast<std::size_t>(x) * 4u];
+            }
+        }
+        midas_native::preprocess_bgr8(
+            context->packed_capture.data(), width, height,
+            static_cast<std::ptrdiff_t>(width) * 3,
+            network, context->image_scratch, context->network_input);
+        context->network_depth.resize(
+            static_cast<std::size_t>(network_elements));
+        context->infer(
+            context->network_input.data(),
+            static_cast<std::uint32_t>(network.width),
+            static_cast<std::uint32_t>(network.height),
+            context->network_depth.data(),
+            context->network_depth.size());
+        const auto bounds = std::minmax_element(
+            context->network_depth.begin(), context->network_depth.end());
+        const float minimum = *bounds.first;
+        const float range = *bounds.second - minimum;
+        if (!(range > 0.0f)) {
+            std::fill_n(
+                depth, static_cast<std::size_t>(network_elements),
+                std::uint8_t{0});
+            return;
+        }
+        for (std::uint64_t index = 0u;
+             index < network_elements; ++index) {
+            const float value =
+                (context->network_depth[static_cast<std::size_t>(index)] -
+                    minimum) /
+                range * 255.0f;
+            depth[index] = static_cast<std::uint8_t>(
+                std::clamp(value, 0.0f, 255.0f));
+        }
     });
 }
 

@@ -106,3 +106,38 @@ The stable, accurate native CPU and Vulkan tensor graphs are complete.
 Direct external-image preprocessing, GPU-resident leased depth output,
 explicit producer/consumer synchronization, and a bounded asynchronous job
 pool remain future integration work.
+
+## Exact InferBridge worker boundary
+
+The original `midas_infer_bgr8` API intentionally implements the official
+MiDaS RGB image path and source-size bicubic output. InferBridge's Python
+template differs: it passes the capture's first three BGR bytes as model
+channels and returns min/max-normalized uint8 depth at the network dimensions.
+
+ABI 2 therefore adds, without changing existing calls,
+`midas_inferbridge_bgra8_u8`. It accepts strided BGRA8, preserves that channel
+quirk, uses the exact MiDaS Small transform/network shape, and performs the
+worker's FP32 normalization and truncating uint8 conversion. The existing
+official and tensor APIs retain their prior behavior.
+
+The exact deployed contract was compared on all 22 Depth Anything V2 assets
+against PyTorch CPU on the Radeon RX 9070, GTX 1080, and RX 6700 XT. Every
+output has the correct network dimensions and differs by at most one uint8
+level on every adapter. `native/tools/compare_assets.py --contract
+inferbridge` reproduces this gate.
+
+## Embedded InferBridge harness
+
+The DLL also exports `ibrh_get_api` for InferBridge harness ABI 1.0. The
+single catalog MiDaS Small entry selects the hidden content-addressed
+`.midas` derivation of its shared canonical `.pt`, accepts host-memory BGRA8,
+and returns a leased host-memory `DEPTH_UNORM8` image at the network shape.
+`source_frame_id` and timestamp are preserved, and the lease remains valid
+after job release.
+
+Capability reporting advertises host input/output and one synchronous
+in-flight job only. The selected Vulkan device executes the graph, while
+capture preprocessing and output readback/quantization remain host
+boundaries. External GPU resources, async execution, and cancellation are not
+advertised. The Windows Release ABI, image, metadata, and real full-graph
+harness tests all pass.
