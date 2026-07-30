@@ -47,8 +47,29 @@ The 256x256 comparison, including Python model construction and both
 executions, completed in 11.6 seconds; performance is intentionally not yet
 an acceptance criterion.
 
-## Remaining before model completion
+## Full image-path gate
 
-GPU capability is not advertised yet. The next gates are exact BGR8
-preprocessing and source-size bicubic output resize, followed by Vulkan
-implementations of the now-proven operators and external-resource integration.
+The complete `midas_infer_bgr8` path was compared on all 22 Depth Anything V2
+asset images at the official input bound of 256. It includes aspect-preserving
+upper-bound shape selection, multiple-of-32 rounding, OpenCV-compatible cubic
+BGR-to-normalized-RGB preprocessing, the full graph, and PyTorch-compatible
+bicubic resize to each source resolution.
+
+| Metric | Result |
+|---|---:|
+| Images | 22 |
+| Minimum relative L1 | 0.0000344% |
+| Median relative L1 | 0.0000617% |
+| Mean relative L1 | 0.0000620% |
+| Maximum relative L1 | 0.0001015% |
+| Maximum absolute error | 0.009735 |
+
+Every image is far below the 1% requirement. Detailed evidence is stored in
+`assets-256.csv`.
+
+## Remaining before GPU completion
+
+The dependency-free CPU DLL is now a stable, accurate native implementation.
+No GPU capability is advertised yet. The next phase is Vulkan translation of
+the proven operators followed by direct external-resource input/output and
+synchronization gates.

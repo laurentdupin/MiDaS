@@ -11,6 +11,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(midas_native SHARED
     src/midas_native.cpp
     src/cpu_executor.cpp
+    src/image.cpp
     src/model.cpp)
 target_include_directories(midas_native
     PUBLIC include
@@ -41,6 +42,17 @@ if(BUILD_TESTING)
     target_link_libraries(midas_c_abi_smoke PRIVATE midas_native)
     target_include_directories(midas_c_abi_smoke PRIVATE include)
     add_test(NAME midas_c_abi_smoke COMMAND midas_c_abi_smoke)
+
+    add_executable(midas_image_tests
+        tests/image_tests.cpp
+        src/image.cpp)
+    target_include_directories(midas_image_tests PRIVATE src)
+    if(MSVC)
+        target_compile_options(midas_image_tests PRIVATE /W4 /permissive-)
+        set_property(TARGET midas_image_tests PROPERTY
+            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    endif()
+    add_test(NAME midas_image_tests COMMAND midas_image_tests)
 
     add_executable(midas_model_metadata_tests
         tests/model_metadata.cpp

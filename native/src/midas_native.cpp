@@ -1,14 +1,19 @@
 #include "midas_native.h"
 
 #include "cpu_executor.h"
+#include "image.h"
 
 #include <memory>
 #include <new>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 struct midas_context {
     std::unique_ptr<midas_native::CpuExecutor> executor;
+    midas_native::ImageScratch image_scratch;
+    std::vector<float> network_input;
+    std::vector<float> network_depth;
 };
 
 namespace {
@@ -89,6 +94,70 @@ midas_status MIDAS_CALL midas_create(
 
 void MIDAS_CALL midas_destroy(midas_context* context) {
     delete context;
+}
+
+midas_status MIDAS_CALL midas_get_network_shape(
+    int32_t image_width,
+    int32_t image_height,
+    int32_t input_size,
+    midas_image_shape* network_shape) {
+    if (network_shape == nullptr) {
+        return fail(
+            MIDAS_STATUS_INVALID_ARGUMENT, "network shape is null");
+    }
+    return protect([&] {
+        const midas_native::ImageShape shape =
+            midas_native::network_shape(
+                image_width, image_height, input_size);
+        network_shape->width = shape.width;
+        network_shape->height = shape.height;
+    });
+}
+
+midas_status MIDAS_CALL midas_infer_bgr8(
+    midas_context* context,
+    const uint8_t* bgr,
+    int32_t width,
+    int32_t height,
+    int64_t stride_bytes,
+    int32_t input_size,
+    float* depth,
+    uint64_t depth_elements) {
+    if (context == nullptr || context->executor == nullptr ||
+        bgr == nullptr || depth == nullptr ||
+        width <= 0 || height <= 0 ||
+        stride_bytes < int64_t(width) * 3 ||
+        input_size <= 0 ||
+        depth_elements < uint64_t(width) * height) {
+        return fail(
+            MIDAS_STATUS_INVALID_ARGUMENT, "invalid BGR8 inference input");
+    }
+    return protect([&] {
+        const midas_native::ImageShape network =
+            midas_native::network_shape(width, height, input_size);
+        midas_native::preprocess_bgr8(
+            bgr,
+            width,
+            height,
+            static_cast<std::ptrdiff_t>(stride_bytes),
+            network,
+            context->image_scratch,
+            context->network_input);
+        context->network_depth.resize(
+            static_cast<std::size_t>(
+                uint64_t(network.width) * network.height));
+        context->executor->infer(
+            context->network_input.data(),
+            static_cast<std::uint32_t>(network.width),
+            static_cast<std::uint32_t>(network.height),
+            context->network_depth.data(),
+            context->network_depth.size());
+        midas_native::resize_depth_bicubic(
+            context->network_depth.data(),
+            network,
+            depth,
+            {width, height});
+    });
 }
 
 midas_status MIDAS_CALL midas_infer_tensor_f32(

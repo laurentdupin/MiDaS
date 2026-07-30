@@ -40,11 +40,11 @@ typedef enum midas_model_kind {
     MIDAS_MODEL_V21_SMALL_256 = 0
 } midas_model_kind;
 
-/*
- * The complete inference lifecycle is added only after the graph passes the
- * PyTorch CPU accuracy gate. This first ABI slice intentionally exposes no
- * false inference or GPU capability.
- */
+typedef struct midas_image_shape {
+    int32_t width;
+    int32_t height;
+} midas_image_shape;
+
 MIDAS_API uint32_t MIDAS_CALL midas_abi_version(void);
 MIDAS_API const char* MIDAS_CALL midas_version_string(void);
 MIDAS_API const char* MIDAS_CALL midas_status_string(midas_status status);
@@ -54,6 +54,20 @@ MIDAS_API midas_status MIDAS_CALL midas_create(
     midas_model_kind model,
     midas_context** context);
 MIDAS_API void MIDAS_CALL midas_destroy(midas_context* context);
+MIDAS_API midas_status MIDAS_CALL midas_get_network_shape(
+    int32_t image_width,
+    int32_t image_height,
+    int32_t input_size,
+    midas_image_shape* network_shape);
+MIDAS_API midas_status MIDAS_CALL midas_infer_bgr8(
+    midas_context* context,
+    const uint8_t* bgr,
+    int32_t width,
+    int32_t height,
+    int64_t stride_bytes,
+    int32_t input_size,
+    float* depth,
+    uint64_t depth_elements);
 MIDAS_API midas_status MIDAS_CALL midas_infer_tensor_f32(
     midas_context* context,
     const float* normalized_rgb_chw,
