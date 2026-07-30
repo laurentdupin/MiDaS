@@ -22,16 +22,33 @@ overlong names. Deployment never parses pickle. The `.midas` output records
 the canonical SHA, converter, format, and model kind for a hidden
 content-addressed cache.
 
-The C model reader and public ABI foundation build without Vulkan or an
-inference framework. Both ABI and bounded-model metadata tests pass, and the
-real converted checkpoint passes the native model probe.
+The C model reader and public ABI build without Vulkan or an inference
+framework. Both ABI and bounded-model metadata tests pass, and the real
+converted checkpoint passes the native model probe.
 
-## Graph work remaining
+## Scalar FP32 graph gate
 
-No inference or GPU capability is advertised yet. The exact pinned graph is
-EfficientNet-Lite3 plus the MiDaS refinement head. New correctness operators
-are depthwise 3x3/5x5 convolution, stride-2 TensorFlow SAME padding,
-BatchNorm inference (eligible for converter-side folding after parity),
-ReLU6, residual add, and the existing bilinear/refinement convolutions.
-These operators and stage outputs must pass PyTorch CPU comparison before the
-lifecycle and GPU-resource ABI become available.
+The dependency-free DLL now executes the complete EfficientNet-Lite3 and
+MiDaS refinement graph from normalized RGB CHW FP32 tensors. It implements
+standard and depthwise 3x3/5x5 convolution, stride-2 TensorFlow SAME padding,
+BatchNorm inference, ReLU6, residual add, align-corners bilinear refinement,
+and the final output head.
+
+Deterministic full-graph comparisons against PyTorch CPU:
+
+| Input | Relative L1 | Maximum absolute error |
+|---:|---:|---:|
+| 32x32 | 0.0000175% | 0.000275 |
+| 64x64 | 0.0000375% | 0.000732 |
+| 256x256 | 0.0000700% | 0.001556 |
+
+This establishes a very tight native correctness oracle for the Vulkan port.
+The 256x256 comparison, including Python model construction and both
+executions, completed in 11.6 seconds; performance is intentionally not yet
+an acceptance criterion.
+
+## Remaining before model completion
+
+GPU capability is not advertised yet. The next gates are exact BGR8
+preprocessing and source-size bicubic output resize, followed by Vulkan
+implementations of the now-proven operators and external-resource integration.

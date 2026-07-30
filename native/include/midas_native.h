@@ -49,6 +49,18 @@ MIDAS_API uint32_t MIDAS_CALL midas_abi_version(void);
 MIDAS_API const char* MIDAS_CALL midas_version_string(void);
 MIDAS_API const char* MIDAS_CALL midas_status_string(midas_status status);
 MIDAS_API const char* MIDAS_CALL midas_last_error(void);
+MIDAS_API midas_status MIDAS_CALL midas_create(
+    const char* model_path_utf8,
+    midas_model_kind model,
+    midas_context** context);
+MIDAS_API void MIDAS_CALL midas_destroy(midas_context* context);
+MIDAS_API midas_status MIDAS_CALL midas_infer_tensor_f32(
+    midas_context* context,
+    const float* normalized_rgb_chw,
+    int32_t width,
+    int32_t height,
+    float* depth,
+    uint64_t depth_elements);
 
 #ifdef __cplusplus
 }

@@ -10,6 +10,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(midas_native SHARED
     src/midas_native.cpp
+    src/cpu_executor.cpp
     src/model.cpp)
 target_include_directories(midas_native
     PUBLIC include
