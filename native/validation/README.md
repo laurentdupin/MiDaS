@@ -67,9 +67,42 @@ bicubic resize to each source resolution.
 Every image is far below the 1% requirement. Detailed evidence is stored in
 `assets-256.csv`.
 
-## Remaining before GPU completion
+## Vulkan graph gate
 
-The dependency-free CPU DLL is now a stable, accurate native implementation.
-No GPU capability is advertised yet. The next phase is Vulkan translation of
-the proven operators followed by direct external-resource input/output and
-synchronization gates.
+The dependency-free DLL also executes the complete network graph through
+Vulkan compute. The model weights remain resident in device-local buffers for
+the context lifetime. Deterministic tensor comparisons against PyTorch CPU on
+the Radeon RX 9070:
+
+| Input | Relative L1 | Maximum absolute error |
+|---:|---:|---:|
+| 32x32 | 0.0000157% | 0.000244 |
+| 64x64 | 0.0000178% | 0.000488 |
+| 256x256 | 0.0000571% | 0.001221 |
+
+The same Vulkan context was reused for all 22 image-path cases:
+
+| Metric | Result |
+|---|---:|
+| Images | 22 |
+| Minimum relative L1 | 0.0000349% |
+| Median relative L1 | 0.0000708% |
+| Mean relative L1 | 0.0000679% |
+| Maximum relative L1 | 0.0001146% |
+| Maximum absolute error | 0.011597 |
+
+Detailed evidence is stored in `assets-256-vulkan.csv`.
+
+The capability probe truthfully advertises `VULKAN_GRAPH`,
+`HOST_TENSOR_UPLOAD`, and `HOST_DEPTH_READBACK`, with one synchronous
+in-flight inference. Image preprocessing and final bicubic resizing currently
+run on the CPU, the normalized tensor is uploaded, and depth is read back.
+There is no claim of an external-resource or zero-copy path. Vulkan work uses
+fences; the implementation contains no `vkQueueWaitIdle`.
+
+## Remaining before end-to-end GPU residency
+
+The stable, accurate native CPU and Vulkan tensor graphs are complete.
+Direct external-image preprocessing, GPU-resident leased depth output,
+explicit producer/consumer synchronization, and a bounded asynchronous job
+pool remain future integration work.

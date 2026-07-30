@@ -8,6 +8,48 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(MIDAS_WITH_VULKAN
+    "Build the dependency-free Vulkan executor" ON)
+
+if(MIDAS_WITH_VULKAN)
+    find_package(Vulkan REQUIRED COMPONENTS glslc)
+    set(MIDAS_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    file(MAKE_DIRECTORY "${MIDAS_GENERATED_DIR}")
+
+    function(midas_compile_shader NAME)
+        set(SOURCE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${NAME}.glsl")
+        set(SPIRV "${MIDAS_GENERATED_DIR}/${NAME}.spv")
+        set(HEADER "${MIDAS_GENERATED_DIR}/${NAME}_spv.h")
+        add_custom_command(
+            OUTPUT "${SPIRV}"
+            COMMAND Vulkan::glslc -fshader-stage=compute
+                --target-env=vulkan1.3 --target-spv=spv1.6 -Werror
+                -o "${SPIRV}" "${SOURCE}"
+            DEPENDS "${SOURCE}"
+            VERBATIM)
+        add_custom_command(
+            OUTPUT "${HEADER}"
+            COMMAND "${CMAKE_COMMAND}"
+                "-DINPUT=${SPIRV}"
+                "-DOUTPUT=${HEADER}"
+                "-DVARIABLE=midas_${NAME}_spv"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
+            DEPENDS
+                "${SPIRV}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
+            VERBATIM)
+        set(MIDAS_SHADER_HEADERS
+            ${MIDAS_SHADER_HEADERS} "${HEADER}" PARENT_SCOPE)
+    endfunction()
+
+    midas_compile_shader(conv2d_grouped)
+    midas_compile_shader(batch_norm_activation)
+    midas_compile_shader(activation)
+    midas_compile_shader(add)
+    midas_compile_shader(bilinear)
+endif()
+
 add_library(midas_native SHARED
     src/midas_native.cpp
     src/cpu_executor.cpp
@@ -17,6 +59,8 @@ target_include_directories(midas_native
     PUBLIC include
     PRIVATE src)
 target_compile_definitions(midas_native PRIVATE MIDAS_BUILD_DLL)
+target_compile_definitions(midas_native PRIVATE
+    $<$<BOOL:${MIDAS_WITH_VULKAN}>:MIDAS_WITH_VULKAN=1>)
 set_target_properties(midas_native PROPERTIES
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN YES)
@@ -24,6 +68,17 @@ if(MSVC)
     target_compile_options(midas_native PRIVATE /W4 /permissive-)
     set_property(TARGET midas_native PROPERTY
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
+if(MIDAS_WITH_VULKAN)
+    target_sources(midas_native PRIVATE
+        src/vulkan.cpp
+        src/vulkan_operators.cpp
+        src/vulkan_executor.cpp
+        ${MIDAS_SHADER_HEADERS})
+    target_include_directories(midas_native PRIVATE
+        "${MIDAS_GENERATED_DIR}")
+    target_link_libraries(midas_native PRIVATE Vulkan::Vulkan)
 endif()
 
 include(CTest)
@@ -35,6 +90,12 @@ if(MSVC)
     target_compile_options(midas_model_probe PRIVATE /W4 /permissive-)
     set_property(TARGET midas_model_probe PROPERTY
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
+if(MIDAS_WITH_VULKAN)
+    add_executable(midas_gpu_probe tools/gpu_probe.c)
+    target_link_libraries(midas_gpu_probe PRIVATE midas_native)
+    target_include_directories(midas_gpu_probe PRIVATE include)
 endif()
 
 if(BUILD_TESTING)

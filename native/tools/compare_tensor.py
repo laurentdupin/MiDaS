@@ -59,6 +59,9 @@ def main() -> None:
     parser.add_argument("--dll", type=Path, required=True)
     parser.add_argument("--size", type=int, default=32)
     parser.add_argument("--seed", type=int, default=20260730)
+    parser.add_argument(
+        "--backend", choices=("cpu", "vulkan"), default="cpu")
+    parser.add_argument("--device", type=int, default=0)
     args = parser.parse_args()
     if args.size <= 0 or args.size % 32:
         parser.error("--size must be a positive multiple of 32")
@@ -84,6 +87,13 @@ def main() -> None:
         ctypes.POINTER(ctypes.c_void_p),
     ]
     dll.midas_create.restype = ctypes.c_int
+    dll.midas_create_vulkan.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    dll.midas_create_vulkan.restype = ctypes.c_int
     dll.midas_destroy.argtypes = [ctypes.c_void_p]
     dll.midas_infer_tensor_f32.argtypes = [
         ctypes.c_void_p,
@@ -97,10 +107,19 @@ def main() -> None:
     dll.midas_last_error.restype = ctypes.c_char_p
 
     context = ctypes.c_void_p()
-    status = dll.midas_create(
-        str(args.model.resolve()).encode(),
-        0,
-        ctypes.byref(context),
+    status = (
+        dll.midas_create_vulkan(
+            str(args.model.resolve()).encode(),
+            0,
+            args.device,
+            ctypes.byref(context),
+        )
+        if args.backend == "vulkan"
+        else dll.midas_create(
+            str(args.model.resolve()).encode(),
+            0,
+            ctypes.byref(context),
+        )
     )
     if status:
         raise RuntimeError(dll.midas_last_error().decode())
@@ -126,6 +145,8 @@ def main() -> None:
     result = {
         "size": args.size,
         "seed": args.seed,
+        "backend": args.backend,
+        "device": args.device if args.backend == "vulkan" else None,
         "max_abs": float(difference.max()),
         "mean_abs": float(difference.mean()),
         "relative_l1": float(

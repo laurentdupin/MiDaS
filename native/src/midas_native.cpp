@@ -2,18 +2,45 @@
 
 #include "cpu_executor.h"
 #include "image.h"
+#if defined(MIDAS_WITH_VULKAN)
+#  include "vulkan_executor.h"
+#endif
 
+#include <algorithm>
 #include <memory>
 #include <new>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 struct midas_context {
     std::unique_ptr<midas_native::CpuExecutor> executor;
+#if defined(MIDAS_WITH_VULKAN)
+    std::unique_ptr<midas_native::VulkanExecutor> vulkan_executor;
+#endif
     midas_native::ImageScratch image_scratch;
     std::vector<float> network_input;
     std::vector<float> network_depth;
+
+    void infer(
+        const float* input,
+        std::uint32_t width,
+        std::uint32_t height,
+        float* depth,
+        std::uint64_t depth_elements) {
+#if defined(MIDAS_WITH_VULKAN)
+        if (vulkan_executor) {
+            vulkan_executor->infer(
+                input, width, height, depth, depth_elements);
+            return;
+        }
+#endif
+        if (!executor) {
+            throw std::runtime_error("MiDaS context has no executor");
+        }
+        executor->infer(input, width, height, depth, depth_elements);
+    }
 };
 
 namespace {
@@ -92,6 +119,72 @@ midas_status MIDAS_CALL midas_create(
     });
 }
 
+midas_status MIDAS_CALL midas_create_vulkan(
+    const char* model_path_utf8,
+    midas_model_kind model,
+    int32_t vulkan_device_index,
+    midas_context** context) {
+    if (context == nullptr) {
+        return fail(MIDAS_STATUS_INVALID_ARGUMENT, "context is null");
+    }
+    *context = nullptr;
+    if (model_path_utf8 == nullptr || model_path_utf8[0] == '\0' ||
+        model != MIDAS_MODEL_V21_SMALL_256 ||
+        vulkan_device_index < 0) {
+        return fail(MIDAS_STATUS_INVALID_ARGUMENT, "invalid create options");
+    }
+#if defined(MIDAS_WITH_VULKAN)
+    return protect([&] {
+        auto result = std::make_unique<midas_context>();
+        result->vulkan_executor =
+            std::make_unique<midas_native::VulkanExecutor>(
+                model_path_utf8,
+                static_cast<std::uint32_t>(vulkan_device_index));
+        *context = result.release();
+    });
+#else
+    return fail(
+        MIDAS_STATUS_VULKAN_UNAVAILABLE,
+        "this DLL was built without Vulkan");
+#endif
+}
+
+midas_status MIDAS_CALL midas_probe_gpu_capabilities(
+    int32_t vulkan_device_index,
+    midas_gpu_capabilities* capabilities) {
+    if (capabilities == nullptr ||
+        capabilities->struct_size < sizeof(*capabilities) ||
+        capabilities->abi_version != MIDAS_ABI_VERSION ||
+        vulkan_device_index < 0) {
+        return fail(
+            MIDAS_STATUS_INVALID_ARGUMENT,
+            "invalid GPU capability probe");
+    }
+#if defined(MIDAS_WITH_VULKAN)
+    return protect([&] {
+        midas_native::VulkanContext context(
+            static_cast<std::uint32_t>(vulkan_device_index));
+        *capabilities = {};
+        capabilities->struct_size = sizeof(*capabilities);
+        capabilities->abi_version = MIDAS_ABI_VERSION;
+        capabilities->flags =
+            MIDAS_GPU_CAP_VULKAN_GRAPH |
+            MIDAS_GPU_CAP_HOST_TENSOR_UPLOAD |
+            MIDAS_GPU_CAP_HOST_DEPTH_READBACK;
+        capabilities->maximum_in_flight_jobs = 1;
+        const std::string& name = context.device_name();
+        const std::size_t bytes = std::min(
+            name.size(), sizeof(capabilities->device_name) - 1);
+        std::memcpy(capabilities->device_name, name.data(), bytes);
+        capabilities->device_name[bytes] = '\0';
+    });
+#else
+    return fail(
+        MIDAS_STATUS_VULKAN_UNAVAILABLE,
+        "this DLL was built without Vulkan");
+#endif
+}
+
 void MIDAS_CALL midas_destroy(midas_context* context) {
     delete context;
 }
@@ -123,7 +216,7 @@ midas_status MIDAS_CALL midas_infer_bgr8(
     int32_t input_size,
     float* depth,
     uint64_t depth_elements) {
-    if (context == nullptr || context->executor == nullptr ||
+    if (context == nullptr ||
         bgr == nullptr || depth == nullptr ||
         width <= 0 || height <= 0 ||
         stride_bytes < int64_t(width) * 3 ||
@@ -146,7 +239,7 @@ midas_status MIDAS_CALL midas_infer_bgr8(
         context->network_depth.resize(
             static_cast<std::size_t>(
                 uint64_t(network.width) * network.height));
-        context->executor->infer(
+        context->infer(
             context->network_input.data(),
             static_cast<std::uint32_t>(network.width),
             static_cast<std::uint32_t>(network.height),
@@ -167,12 +260,12 @@ midas_status MIDAS_CALL midas_infer_tensor_f32(
     int32_t height,
     float* depth,
     uint64_t depth_elements) {
-    if (context == nullptr || context->executor == nullptr ||
+    if (context == nullptr ||
         width <= 0 || height <= 0) {
         return fail(MIDAS_STATUS_INVALID_ARGUMENT, "invalid inference input");
     }
     return protect([&] {
-        context->executor->infer(
+        context->infer(
             normalized_rgb_chw,
             static_cast<std::uint32_t>(width),
             static_cast<std::uint32_t>(height),

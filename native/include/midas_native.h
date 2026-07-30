@@ -45,6 +45,20 @@ typedef struct midas_image_shape {
     int32_t height;
 } midas_image_shape;
 
+enum {
+    MIDAS_GPU_CAP_VULKAN_GRAPH = 1ull << 0u,
+    MIDAS_GPU_CAP_HOST_TENSOR_UPLOAD = 1ull << 1u,
+    MIDAS_GPU_CAP_HOST_DEPTH_READBACK = 1ull << 2u
+};
+
+typedef struct midas_gpu_capabilities {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint64_t flags;
+    uint32_t maximum_in_flight_jobs;
+    char device_name[256];
+} midas_gpu_capabilities;
+
 MIDAS_API uint32_t MIDAS_CALL midas_abi_version(void);
 MIDAS_API const char* MIDAS_CALL midas_version_string(void);
 MIDAS_API const char* MIDAS_CALL midas_status_string(midas_status status);
@@ -53,6 +67,14 @@ MIDAS_API midas_status MIDAS_CALL midas_create(
     const char* model_path_utf8,
     midas_model_kind model,
     midas_context** context);
+MIDAS_API midas_status MIDAS_CALL midas_create_vulkan(
+    const char* model_path_utf8,
+    midas_model_kind model,
+    int32_t vulkan_device_index,
+    midas_context** context);
+MIDAS_API midas_status MIDAS_CALL midas_probe_gpu_capabilities(
+    int32_t vulkan_device_index,
+    midas_gpu_capabilities* capabilities);
 MIDAS_API void MIDAS_CALL midas_destroy(midas_context* context);
 MIDAS_API midas_status MIDAS_CALL midas_get_network_shape(
     int32_t image_width,

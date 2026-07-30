@@ -17,11 +17,22 @@ from compare_tensor import load_reference
 
 
 class Context:
-    def __init__(self, dll, model: Path):
+    def __init__(self, dll, model: Path, backend: str, device: int):
         self.dll = dll
         self.value = ctypes.c_void_p()
-        status = dll.midas_create(
-            str(model.resolve()).encode(), 0, ctypes.byref(self.value)
+        status = (
+            dll.midas_create_vulkan(
+                str(model.resolve()).encode(),
+                0,
+                device,
+                ctypes.byref(self.value),
+            )
+            if backend == "vulkan"
+            else dll.midas_create(
+                str(model.resolve()).encode(),
+                0,
+                ctypes.byref(self.value),
+            )
         )
         if status:
             raise RuntimeError(dll.midas_last_error().decode())
@@ -40,6 +51,13 @@ def configure_dll(path: Path):
         ctypes.POINTER(ctypes.c_void_p),
     ]
     dll.midas_create.restype = ctypes.c_int
+    dll.midas_create_vulkan.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    dll.midas_create_vulkan.restype = ctypes.c_int
     dll.midas_destroy.argtypes = [ctypes.c_void_p]
     dll.midas_infer_bgr8.argtypes = [
         ctypes.c_void_p,
@@ -78,6 +96,9 @@ def main() -> None:
     parser.add_argument("--assets", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--input-size", type=int, default=256)
+    parser.add_argument(
+        "--backend", choices=("cpu", "vulkan"), default="cpu")
+    parser.add_argument("--device", type=int, default=0)
     args = parser.parse_args()
 
     reference_model = load_reference(
@@ -86,7 +107,7 @@ def main() -> None:
         args.checkpoint.resolve(),
     )
     dll = configure_dll(args.dll)
-    context = Context(dll, args.model)
+    context = Context(dll, args.model, args.backend, args.device)
     paths = sorted(
         path
         for path in args.assets.rglob("*")
