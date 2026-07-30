@@ -5,6 +5,10 @@
 #include "batch_norm_activation_spv.h"
 #include "bilinear_spv.h"
 #include "conv2d_grouped_spv.h"
+#include "conv2d_pointwise4_spv.h"
+#include "conv2d_depthwise3_spv.h"
+#include "conv2d_spatial4_spv.h"
+#include "conv2d_spatial4_tiled_spv.h"
 
 #include <vector>
 
@@ -22,6 +26,26 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
       conv_(context.create_pipeline(
           midas_conv2d_grouped_spv,
           midas_conv2d_grouped_spv_size,
+          4,
+          52)),
+      conv_pointwise4_(context.create_pipeline(
+          midas_conv2d_pointwise4_spv,
+          midas_conv2d_pointwise4_spv_size,
+          4,
+          52)),
+      conv_depthwise3_(context.create_pipeline(
+          midas_conv2d_depthwise3_spv,
+          midas_conv2d_depthwise3_spv_size,
+          4,
+          52)),
+      conv_spatial4_(context.create_pipeline(
+          midas_conv2d_spatial4_spv,
+          midas_conv2d_spatial4_spv_size,
+          4,
+          52)),
+      conv_spatial4_tiled_(context.create_pipeline(
+          midas_conv2d_spatial4_tiled_spv,
+          midas_conv2d_spatial4_tiled_spv_size,
           4,
           52)),
       batch_norm_activation_(context.create_pipeline(
@@ -45,6 +69,11 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           2,
           24)) {
     conv_.set_debug_name("midas_conv2d_grouped");
+    conv_pointwise4_.set_debug_name("midas_conv2d_pointwise4");
+    conv_depthwise3_.set_debug_name("midas_conv2d_depthwise3");
+    conv_spatial4_.set_debug_name("midas_conv2d_spatial4");
+    conv_spatial4_tiled_.set_debug_name(
+        "midas_conv2d_spatial4_tiled");
     batch_norm_activation_.set_debug_name(
         "midas_batch_norm_activation");
     activation_.set_debug_name("midas_activation");
@@ -89,14 +118,32 @@ void VulkanOperators::conv(
         output_width, output_height, output_channels,
         kernel_height, kernel_width, stride,
         padding_top, padding_left, groups, has_bias ? 1u : 0u};
+    const bool pointwise =
+        groups == 1 && kernel_height == 1 && kernel_width == 1 &&
+        stride == 1 && padding_top == 0 && padding_left == 0 &&
+        input_width == output_width && input_height == output_height;
+    const bool depthwise =
+        groups == input_channels && groups == output_channels &&
+        kernel_height == 3 && kernel_width == 3 && stride <= 2 &&
+        padding_top == 1 && padding_left == 1;
+    const bool spatial4 =
+        groups == 1 && kernel_height == 3 && kernel_width == 3;
+    const bool spatial4_tiled =
+        spatial4 && stride == 1 && padding_top == 1 &&
+        padding_left == 1 && input_width == output_width &&
+        input_height == output_height;
     context_.dispatch(
-        conv_,
+        pointwise ? conv_pointwise4_ :
+        (depthwise ? conv_depthwise3_ :
+        (spatial4_tiled ? conv_spatial4_tiled_ :
+        (spatial4 ? conv_spatial4_ : conv_))),
         {&output, &input, &weight, &bias},
         &parameters,
         sizeof(parameters),
         divide_up(output_width, 8),
         divide_up(output_height, 8),
-        output_channels);
+        (pointwise || spatial4)
+            ? divide_up(output_channels, 4) : output_channels);
 }
 
 void VulkanOperators::batch_norm_activation(

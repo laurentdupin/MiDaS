@@ -61,6 +61,10 @@ public:
 private:
     VulkanContext& context_;
     VulkanPipeline conv_;
+    VulkanPipeline conv_pointwise4_;
+    VulkanPipeline conv_depthwise3_;
+    VulkanPipeline conv_spatial4_;
+    VulkanPipeline conv_spatial4_tiled_;
     VulkanPipeline batch_norm_activation_;
     VulkanPipeline activation_;
     VulkanPipeline add_;
