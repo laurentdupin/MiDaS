@@ -6,6 +6,7 @@
 #include "bilinear_spv.h"
 #include "conv2d_grouped_spv.h"
 #include "conv2d_pointwise4_spv.h"
+#include "conv2d_pointwise_gemm_spv.h"
 #include "conv2d_depthwise3_spv.h"
 #include "conv2d_spatial4_spv.h"
 #include "conv2d_spatial4_tiled_spv.h"
@@ -31,6 +32,11 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
       conv_pointwise4_(context.create_pipeline(
           midas_conv2d_pointwise4_spv,
           midas_conv2d_pointwise4_spv_size,
+          4,
+          52)),
+      conv_pointwise_gemm_(context.create_pipeline(
+          midas_conv2d_pointwise_gemm_spv,
+          midas_conv2d_pointwise_gemm_spv_size,
           4,
           52)),
       conv_depthwise3_(context.create_pipeline(
@@ -70,6 +76,7 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           24)) {
     conv_.set_debug_name("midas_conv2d_grouped");
     conv_pointwise4_.set_debug_name("midas_conv2d_pointwise4");
+    conv_pointwise_gemm_.set_debug_name("midas_conv2d_pointwise_gemm");
     conv_depthwise3_.set_debug_name("midas_conv2d_depthwise3");
     conv_spatial4_.set_debug_name("midas_conv2d_spatial4");
     conv_spatial4_tiled_.set_debug_name(
@@ -133,17 +140,24 @@ void VulkanOperators::conv(
         padding_left == 1 && input_width == output_width &&
         input_height == output_height;
     context_.dispatch(
-        pointwise ? conv_pointwise4_ :
+        pointwise ? conv_pointwise_gemm_ :
         (depthwise ? conv_depthwise3_ :
         (spatial4_tiled ? conv_spatial4_tiled_ :
         (spatial4 ? conv_spatial4_ : conv_))),
         {&output, &input, &weight, &bias},
         &parameters,
         sizeof(parameters),
-        divide_up(output_width, 8),
-        divide_up(output_height, 8),
-        (pointwise || spatial4)
-            ? divide_up(output_channels, 4) : output_channels);
+        pointwise
+            ? divide_up(output_width * output_height, 32)
+            : divide_up(output_width, spatial4_tiled ? 16 : 8),
+        pointwise
+            ? divide_up(output_channels, 32)
+            : divide_up(output_height, 8),
+        pointwise
+            ? 1
+            : (spatial4
+                ? divide_up(output_channels, spatial4_tiled ? 8 : 4)
+                : output_channels));
 }
 
 void VulkanOperators::batch_norm_activation(

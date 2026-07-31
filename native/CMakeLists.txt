@@ -45,6 +45,7 @@ if(MIDAS_WITH_VULKAN)
 
     midas_compile_shader(conv2d_grouped)
     midas_compile_shader(conv2d_pointwise4)
+    midas_compile_shader(conv2d_pointwise_gemm)
     midas_compile_shader(conv2d_depthwise3)
     midas_compile_shader(conv2d_spatial4)
     midas_compile_shader(conv2d_spatial4_tiled)

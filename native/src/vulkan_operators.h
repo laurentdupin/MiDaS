@@ -62,6 +62,7 @@ private:
     VulkanContext& context_;
     VulkanPipeline conv_;
     VulkanPipeline conv_pointwise4_;
+    VulkanPipeline conv_pointwise_gemm_;
     VulkanPipeline conv_depthwise3_;
     VulkanPipeline conv_spatial4_;
     VulkanPipeline conv_spatial4_tiled_;
