@@ -186,6 +186,25 @@ midas_status MIDAS_CALL midas_probe_gpu_capabilities(
 #endif
 }
 
+midas_status MIDAS_CALL midas_get_transfer_counters(
+    midas_transfer_counters* counters) {
+    if (counters == nullptr || counters->struct_size < sizeof(*counters)) {
+        return fail(
+            MIDAS_STATUS_INVALID_ARGUMENT,
+            "invalid MiDaS transfer counter descriptor");
+    }
+    *counters = {};
+    counters->struct_size = sizeof(*counters);
+    counters->abi_version = MIDAS_ABI_VERSION;
+#if defined(MIDAS_WITH_VULKAN)
+    midas_native::global_transfer_counters(
+        counters->tensor_upload_bytes,
+        counters->tensor_download_bytes);
+#endif
+    last_error.clear();
+    return MIDAS_STATUS_OK;
+}
+
 void MIDAS_CALL midas_destroy(midas_context* context) {
     delete context;
 }

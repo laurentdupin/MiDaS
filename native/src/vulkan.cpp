@@ -12,6 +12,9 @@
 namespace midas_native {
 namespace {
 
+std::atomic<std::uint64_t> g_tensor_upload_bytes{0u};
+std::atomic<std::uint64_t> g_tensor_download_bytes{0u};
+
 template <typename Handle>
 void exchange_handle(Handle& left, Handle& right) {
     std::swap(left, right);
@@ -1279,6 +1282,9 @@ void VulkanContext::upload(
     tensor_upload_bytes_.fetch_add(
         static_cast<std::uint64_t>(bytes),
         std::memory_order_relaxed);
+    g_tensor_upload_bytes.fetch_add(
+        static_cast<std::uint64_t>(bytes),
+        std::memory_order_relaxed);
     VulkanBuffer staging = create_host_buffer(bytes);
     std::memcpy(staging.mapped_, data, bytes);
     copy_buffer(staging.buffer_, destination.buffer_, bytes);
@@ -1294,6 +1300,9 @@ void VulkanContext::download(
     tensor_download_bytes_.fetch_add(
         static_cast<std::uint64_t>(bytes),
         std::memory_order_relaxed);
+    g_tensor_download_bytes.fetch_add(
+        static_cast<std::uint64_t>(bytes),
+        std::memory_order_relaxed);
     VulkanBuffer staging = create_host_buffer(bytes);
     copy_buffer(source.buffer_, staging.buffer_, bytes);
     std::memcpy(data, staging.mapped_, bytes);
@@ -1306,6 +1315,13 @@ void VulkanContext::transfer_counters(
         tensor_upload_bytes_.load(std::memory_order_relaxed);
     download_bytes =
         tensor_download_bytes_.load(std::memory_order_relaxed);
+}
+
+void global_transfer_counters(
+    std::uint64_t& upload_bytes,
+    std::uint64_t& download_bytes) {
+    upload_bytes = g_tensor_upload_bytes.load(std::memory_order_relaxed);
+    download_bytes = g_tensor_download_bytes.load(std::memory_order_relaxed);
 }
 
 void VulkanContext::acquire_external_buffer(

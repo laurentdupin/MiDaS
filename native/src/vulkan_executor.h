@@ -25,6 +25,7 @@ public:
         std::uint32_t width,
         std::uint32_t height);
     VulkanContext& context() { return context_; }
+    const VulkanContext& context() const { return context_; }
     const std::string& device_name() const {
         return context_.device_name();
     }

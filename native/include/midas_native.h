@@ -19,7 +19,7 @@
 extern "C" {
 #endif
 
-#define MIDAS_ABI_VERSION 2u
+#define MIDAS_ABI_VERSION 3u
 
 typedef struct midas_context midas_context;
 
@@ -59,6 +59,13 @@ typedef struct midas_gpu_capabilities {
     char device_name[256];
 } midas_gpu_capabilities;
 
+typedef struct midas_transfer_counters {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint64_t tensor_upload_bytes;
+    uint64_t tensor_download_bytes;
+} midas_transfer_counters;
+
 MIDAS_API uint32_t MIDAS_CALL midas_abi_version(void);
 MIDAS_API const char* MIDAS_CALL midas_version_string(void);
 MIDAS_API const char* MIDAS_CALL midas_status_string(midas_status status);
@@ -75,6 +82,8 @@ MIDAS_API midas_status MIDAS_CALL midas_create_vulkan(
 MIDAS_API midas_status MIDAS_CALL midas_probe_gpu_capabilities(
     int32_t vulkan_device_index,
     midas_gpu_capabilities* capabilities);
+MIDAS_API midas_status MIDAS_CALL midas_get_transfer_counters(
+    midas_transfer_counters* counters);
 MIDAS_API void MIDAS_CALL midas_destroy(midas_context* context);
 MIDAS_API midas_status MIDAS_CALL midas_get_network_shape(
     int32_t image_width,

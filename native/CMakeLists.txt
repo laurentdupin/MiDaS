@@ -106,6 +106,7 @@ endif()
 if(MIDAS_WITH_VULKAN)
     target_sources(midas_native PRIVATE
         src/vulkan.cpp
+        src/external_gpu.cpp
         src/gpu_io.cpp
         src/vulkan_operators.cpp
         src/vulkan_executor.cpp
@@ -113,6 +114,9 @@ if(MIDAS_WITH_VULKAN)
     target_include_directories(midas_native PRIVATE
         "${MIDAS_GENERATED_DIR}")
     target_link_libraries(midas_native PRIVATE Vulkan::Vulkan)
+    if(WIN32)
+        target_link_libraries(midas_native PRIVATE d3d12 dxgi)
+    endif()
 endif()
 
 include(CTest)
@@ -157,6 +161,24 @@ if(BUILD_TESTING)
         COMMAND midas_harness_full_graph)
     set_tests_properties(
         midas_harness_full_graph PROPERTIES SKIP_RETURN_CODE 77)
+
+    if(WIN32 AND MIDAS_WITH_VULKAN)
+        add_executable(
+            midas_d3d12_full_graph tests/d3d12_full_graph.cpp)
+        target_link_libraries(
+            midas_d3d12_full_graph PRIVATE midas_native d3d12 dxgi)
+        target_include_directories(
+            midas_d3d12_full_graph PRIVATE include)
+        target_compile_options(
+            midas_d3d12_full_graph PRIVATE /W4 /permissive-)
+        set_property(TARGET midas_d3d12_full_graph PROPERTY
+            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        add_test(
+            NAME midas_d3d12_full_graph
+            COMMAND midas_d3d12_full_graph)
+        set_tests_properties(
+            midas_d3d12_full_graph PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
 
     add_executable(midas_image_tests
         tests/image_tests.cpp
