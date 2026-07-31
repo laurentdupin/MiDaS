@@ -20,6 +20,11 @@ public:
         std::uint32_t height,
         float* depth,
         std::uint64_t depth_elements);
+    VulkanBuffer infer_device(
+        VulkanBuffer normalized_rgb_chw,
+        std::uint32_t width,
+        std::uint32_t height);
+    VulkanContext& context() { return context_; }
     const std::string& device_name() const {
         return context_.device_name();
     }

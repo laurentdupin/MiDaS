@@ -410,17 +410,31 @@ void VulkanExecutor::infer(
         depth_elements < std::uint64_t(width) * height) {
         throw std::invalid_argument("invalid Vulkan MiDaS tensor shape");
     }
-    Tensor input{
-        3,
-        height,
-        width,
-        context_.create_device_buffer(
-            elements(3, height, width) * sizeof(float))};
+    VulkanBuffer input = context_.create_device_buffer(
+        elements(3, height, width) * sizeof(float));
     context_.upload(
-        input.buffer,
+        input,
         normalized_rgb_chw,
         static_cast<std::size_t>(
             elements(3, height, width) * sizeof(float)));
+    VulkanBuffer output = infer_device(
+        std::move(input), width, height);
+    context_.download(
+        output,
+        depth,
+        static_cast<std::size_t>(
+            std::uint64_t(width) * height * sizeof(float)));
+}
+
+VulkanBuffer VulkanExecutor::infer_device(
+    VulkanBuffer normalized_rgb_chw,
+    std::uint32_t width,
+    std::uint32_t height) {
+    if (width == 0 || height == 0 || width % 32 != 0 || height % 32 != 0 ||
+        normalized_rgb_chw.size() < elements(3, height, width) * sizeof(float)) {
+        throw std::invalid_argument("invalid Vulkan MiDaS device tensor shape");
+    }
+    Tensor input{3, height, width, std::move(normalized_rgb_chw)};
     Tensor output;
     context_.batch([&] {
         Tensor value = conv(
@@ -514,11 +528,7 @@ void VulkanExecutor::infer(
             "scratch.output_conv.4.bias", 1, false);
         output = activation(path, 1);
     });
-    context_.download(
-        output.buffer,
-        depth,
-        static_cast<std::size_t>(
-            std::uint64_t(width) * height * sizeof(float)));
+    return std::move(output.buffer);
 }
 
 }  // namespace midas_native

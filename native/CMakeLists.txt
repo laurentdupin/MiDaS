@@ -75,6 +75,8 @@ if(MIDAS_WITH_VULKAN)
     midas_compile_shader(activation)
     midas_compile_shader(add)
     midas_compile_shader(bilinear)
+    midas_compile_shader(preprocess_texture)
+    midas_compile_shader(resize_depth_image)
 endif()
 
 add_library(midas_native SHARED
@@ -104,6 +106,7 @@ endif()
 if(MIDAS_WITH_VULKAN)
     target_sources(midas_native PRIVATE
         src/vulkan.cpp
+        src/gpu_io.cpp
         src/vulkan_operators.cpp
         src/vulkan_executor.cpp
         ${MIDAS_SHADER_HEADERS})
