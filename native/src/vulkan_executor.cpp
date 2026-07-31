@@ -1,9 +1,11 @@
 #include "vulkan_executor.h"
 
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace midas_native {
 namespace {
@@ -41,7 +43,7 @@ VulkanExecutor::VulkanExecutor(
       zero_bias_(context_.create_device_buffer(sizeof(float))) {
     const float zero = 0.0f;
     context_.upload(zero_bias_, &zero, sizeof(zero));
-    weights_.reserve(model_.tensor_count());
+    weights_.reserve(model_.tensor_count() + 64);
     for (std::string_view name_view : model_.tensor_names()) {
         const std::string name(name_view);
         const TensorView& tensor = model_.tensor(name);
@@ -53,6 +55,95 @@ VulkanExecutor::VulkanExecutor(
             static_cast<std::size_t>(
                 tensor.elements * sizeof(float)));
         weights_.emplace(name, std::move(buffer));
+    }
+    const auto fold_batch_norm =
+        [&](const std::string& weight_name, const std::string& prefix) {
+        const TensorView& source = model_.tensor(weight_name);
+        const TensorView& gamma = model_.tensor(tensor_weight(prefix));
+        const TensorView& beta = model_.tensor(tensor_bias(prefix));
+        const TensorView& mean = model_.tensor(prefix + ".running_mean");
+        const TensorView& variance =
+            model_.tensor(prefix + ".running_var");
+        if (source.rank != 4 || source.dimensions[0] != gamma.elements ||
+            gamma.elements != beta.elements ||
+            gamma.elements != mean.elements ||
+            gamma.elements != variance.elements) {
+            throw std::runtime_error(
+                "GPU batch norm tensor shape mismatch");
+        }
+        const std::size_t output_channels =
+            static_cast<std::size_t>(gamma.elements);
+        const std::size_t elements_per_channel =
+            static_cast<std::size_t>(source.elements) / output_channels;
+        std::vector<float> folded(
+            static_cast<std::size_t>(source.elements));
+        std::vector<float> bias(output_channels);
+        for (std::size_t channel = 0;
+             channel < output_channels;
+             ++channel) {
+            const float scale = gamma.data[channel] /
+                std::sqrt(variance.data[channel] + 0.001f);
+            bias[channel] =
+                beta.data[channel] - mean.data[channel] * scale;
+            const std::size_t begin = channel * elements_per_channel;
+            for (std::size_t index = 0;
+                 index < elements_per_channel;
+                 ++index) {
+                folded[begin + index] =
+                    source.data[begin + index] * scale;
+            }
+        }
+        VulkanBuffer folded_buffer = context_.create_device_buffer(
+            folded.size() * sizeof(float));
+        VulkanBuffer bias_buffer = context_.create_device_buffer(
+            bias.size() * sizeof(float));
+        context_.upload(
+            folded_buffer,
+            folded.data(),
+            folded.size() * sizeof(float));
+        context_.upload(
+            bias_buffer,
+            bias.data(),
+            bias.size() * sizeof(float));
+        weights_.emplace(
+            weight_name + ".folded", std::move(folded_buffer));
+        weights_.emplace(
+            weight_name + ".folded_bias", std::move(bias_buffer));
+    };
+    fold_batch_norm(
+        "pretrained.layer1.0.weight", "pretrained.layer1.1");
+    for (std::string_view name_view : model_.tensor_names()) {
+        const std::string name(name_view);
+        constexpr std::string_view pointwise = ".conv_pw.weight";
+        constexpr std::string_view depthwise = ".conv_dw.weight";
+        constexpr std::string_view projection = ".conv_pwl.weight";
+        std::string prefix;
+        std::string batch_norm;
+        if (name_view.size() > pointwise.size() &&
+            name_view.substr(name_view.size() - pointwise.size()) ==
+                pointwise) {
+            prefix = name.substr(0, name.size() - pointwise.size());
+            batch_norm = model_.contains(prefix + ".conv_pwl.weight")
+                ? prefix + ".bn1"
+                : prefix + ".bn2";
+        } else if (
+            name_view.size() > depthwise.size() &&
+            name_view.substr(name_view.size() - depthwise.size()) ==
+                depthwise) {
+            prefix = name.substr(0, name.size() - depthwise.size());
+            batch_norm = model_.contains(prefix + ".conv_pwl.weight")
+                ? prefix + ".bn2"
+                : prefix + ".bn1";
+        } else if (
+            name_view.size() > projection.size() &&
+            name_view.substr(name_view.size() - projection.size()) ==
+                projection) {
+            prefix = name.substr(0, name.size() - projection.size());
+            batch_norm = prefix + ".bn3";
+        }
+        if (!batch_norm.empty()) {
+            fold_batch_norm(name, batch_norm);
+        }
     }
 }
 
@@ -72,7 +163,11 @@ VulkanExecutor::Tensor VulkanExecutor::conv(
     const char* bias_name,
     std::uint32_t stride,
     bool same_stride2,
-    std::uint32_t groups) {
+    std::uint32_t groups,
+    const char* batch_norm_prefix,
+    std::uint32_t activation,
+    bool relu_input,
+    const VulkanBuffer* residual) {
     const TensorView& shape = model_.tensor(weight_name);
     if (shape.rank != 4 || groups == 0 ||
         input.channels % groups != 0 ||
@@ -106,11 +201,20 @@ VulkanExecutor::Tensor VulkanExecutor::conv(
         context_.create_device_buffer(
             elements(output_channels, output_h, output_w) *
             sizeof(float))};
+    const VulkanBuffer* convolution_weight = &weight(weight_name);
+    const VulkanBuffer* convolution_bias =
+        bias_name ? &weight(bias_name) : &zero_bias_;
+    bool convolution_has_bias = bias_name != nullptr;
+    if (batch_norm_prefix != nullptr) {
+        convolution_weight = &weight(weight_name + ".folded");
+        convolution_bias = &weight(weight_name + ".folded_bias");
+        convolution_has_bias = true;
+    }
     operators_.conv(
         output.buffer,
         input.buffer,
-        weight(weight_name),
-        bias_name ? weight(bias_name) : zero_bias_,
+        *convolution_weight,
+        *convolution_bias,
         input.width,
         input.height,
         input.channels,
@@ -123,7 +227,14 @@ VulkanExecutor::Tensor VulkanExecutor::conv(
         padding_top,
         padding_left,
         groups,
-        bias_name != nullptr);
+        convolution_has_bias,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        activation,
+        relu_input,
+        residual);
     return output;
 }
 
@@ -223,12 +334,13 @@ VulkanExecutor::Tensor VulkanExecutor::depthwise_separable(
     const std::string& prefix) {
     Tensor value = conv(
         input, tensor_weight(prefix + ".conv_dw"),
-        nullptr, 1, false, input.channels);
-    value = batch_norm_activation(value, prefix + ".bn1", 2);
+        nullptr, 1, false, input.channels,
+        (prefix + ".bn1").c_str(), 2);
     value = conv(
         value, tensor_weight(prefix + ".conv_pw"),
-        nullptr, 1, false);
-    return batch_norm_activation(value, prefix + ".bn2", 0);
+        nullptr, 1, false, 1,
+        (prefix + ".bn2").c_str(), 0);
+    return value;
 }
 
 VulkanExecutor::Tensor VulkanExecutor::inverted(
@@ -238,31 +350,27 @@ VulkanExecutor::Tensor VulkanExecutor::inverted(
     bool residual) {
     Tensor value = conv(
         input, tensor_weight(prefix + ".conv_pw"),
-        nullptr, 1, false);
-    value = batch_norm_activation(value, prefix + ".bn1", 2);
+        nullptr, 1, false, 1,
+        (prefix + ".bn1").c_str(), 2);
     value = conv(
         value, tensor_weight(prefix + ".conv_dw"),
-        nullptr, stride, stride == 2, value.channels);
-    value = batch_norm_activation(value, prefix + ".bn2", 2);
+        nullptr, stride, stride == 2, value.channels,
+        (prefix + ".bn2").c_str(), 2);
     value = conv(
         value, tensor_weight(prefix + ".conv_pwl"),
-        nullptr, 1, false);
-    value = batch_norm_activation(value, prefix + ".bn3", 0);
-    if (residual) {
-        return add(value, input);
-    }
+        nullptr, 1, false, 1,
+        (prefix + ".bn3").c_str(), 0, false,
+        residual ? &input.buffer : nullptr);
     return value;
 }
 
 VulkanExecutor::Tensor VulkanExecutor::residual_unit(
     const Tensor& input,
     const std::string& prefix) {
-    Tensor value = activation(input, 1);
     const std::string conv1 = prefix + ".conv1";
-    value = conv(
-        value, tensor_weight(conv1),
-        tensor_bias(conv1).c_str(), 1, false);
-    value = activation(value, 1);
+    Tensor value = conv(
+        input, tensor_weight(conv1),
+        tensor_bias(conv1).c_str(), 1, false, 1, nullptr, 1, true);
     const std::string conv2 = prefix + ".conv2";
     value = conv(
         value, tensor_weight(conv2),
@@ -317,9 +425,7 @@ void VulkanExecutor::infer(
     context_.batch([&] {
         Tensor value = conv(
             input, "pretrained.layer1.0.weight",
-            nullptr, 2, true);
-        value = batch_norm_activation(
-            value, "pretrained.layer1.1", 2);
+            nullptr, 2, true, 1, "pretrained.layer1.1", 2);
         value = depthwise_separable(
             value, "pretrained.layer1.3.0");
         for (std::uint32_t block = 0; block < 3; ++block) {

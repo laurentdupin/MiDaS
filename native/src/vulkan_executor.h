@@ -39,7 +39,11 @@ private:
         const char* bias_name,
         std::uint32_t stride,
         bool same_stride2,
-        std::uint32_t groups = 1);
+        std::uint32_t groups = 1,
+        const char* batch_norm_prefix = nullptr,
+        std::uint32_t activation = 0,
+        bool relu_input = false,
+        const VulkanBuffer* residual = nullptr);
     Tensor batch_norm_activation(
         const Tensor& input,
         const std::string& prefix,

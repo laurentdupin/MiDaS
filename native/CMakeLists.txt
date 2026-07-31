@@ -17,14 +17,23 @@ if(MIDAS_WITH_VULKAN)
     file(MAKE_DIRECTORY "${MIDAS_GENERATED_DIR}")
 
     function(midas_compile_shader NAME)
+        set(SOURCE_NAME "${NAME}")
+        set(EXTRA_ARGUMENTS)
+        if(ARGC GREATER 1)
+            set(SOURCE_NAME "${ARGV1}")
+        endif()
+        if(ARGC GREATER 2)
+            list(APPEND EXTRA_ARGUMENTS "${ARGV2}")
+        endif()
         set(SOURCE
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${NAME}.glsl")
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${SOURCE_NAME}.glsl")
         set(SPIRV "${MIDAS_GENERATED_DIR}/${NAME}.spv")
         set(HEADER "${MIDAS_GENERATED_DIR}/${NAME}_spv.h")
         add_custom_command(
             OUTPUT "${SPIRV}"
-            COMMAND Vulkan::glslc -fshader-stage=compute
+            COMMAND Vulkan::glslc -O -fshader-stage=compute
                 --target-env=vulkan1.3 --target-spv=spv1.6 -Werror
+                ${EXTRA_ARGUMENTS}
                 -o "${SPIRV}" "${SOURCE}"
             DEPENDS "${SOURCE}"
             VERBATIM)
@@ -43,12 +52,25 @@ if(MIDAS_WITH_VULKAN)
             ${MIDAS_SHADER_HEADERS} "${HEADER}" PARENT_SCOPE)
     endfunction()
 
-    midas_compile_shader(conv2d_grouped)
-    midas_compile_shader(conv2d_pointwise4)
-    midas_compile_shader(conv2d_pointwise_gemm)
-    midas_compile_shader(conv2d_depthwise3)
-    midas_compile_shader(conv2d_spatial4)
-    midas_compile_shader(conv2d_spatial4_tiled)
+    midas_compile_shader(
+        conv2d_grouped conv2d_grouped -DNO_BATCH_NORM=1)
+    midas_compile_shader(
+        conv2d_pointwise4 conv2d_pointwise4 -DNO_BATCH_NORM=1)
+    midas_compile_shader(
+        conv2d_pointwise_gemm conv2d_pointwise_gemm -DNO_BATCH_NORM=1)
+    midas_compile_shader(
+        conv2d_pointwise_gemm_residual conv2d_pointwise_gemm
+        -DADD_RESIDUAL=1)
+    midas_compile_shader(
+        conv2d_depthwise3 conv2d_depthwise3 -DNO_BATCH_NORM=1)
+    midas_compile_shader(
+        conv2d_spatial4 conv2d_spatial4 -DNO_BATCH_NORM=1)
+    midas_compile_shader(
+        conv2d_spatial4_tiled conv2d_spatial4_tiled
+        -DNO_BATCH_NORM=1)
+    midas_compile_shader(
+        conv2d_spatial4_tiled_relu conv2d_spatial4_tiled
+        -DRELU_INPUT=1)
     midas_compile_shader(batch_norm_activation)
     midas_compile_shader(activation)
     midas_compile_shader(add)

@@ -14,6 +14,12 @@ layout(set = 0, binding = 2, std430) readonly buffer Weight {
 layout(set = 0, binding = 3, std430) readonly buffer Bias {
     float data[];
 } bias_buffer;
+#if !defined(NO_BATCH_NORM)
+layout(set = 0, binding = 4, std430) readonly buffer Gamma { float data[]; } gamma_buffer;
+layout(set = 0, binding = 5, std430) readonly buffer Beta { float data[]; } beta_buffer;
+layout(set = 0, binding = 6, std430) readonly buffer Mean { float data[]; } mean_buffer;
+layout(set = 0, binding = 7, std430) readonly buffer Variance { float data[]; } variance_buffer;
+#endif
 
 layout(push_constant) uniform Parameters {
     uint input_width;
@@ -29,6 +35,9 @@ layout(push_constant) uniform Parameters {
     int padding_left;
     uint groups;
     uint has_bias;
+    uint has_batch_norm;
+    uint activation;
+    float epsilon;
 } parameters;
 
 void main() {
@@ -68,6 +77,18 @@ void main() {
                     weight_buffer.data[weight_index];
             }
         }
+    }
+#if !defined(NO_BATCH_NORM)
+    if (parameters.has_batch_norm != 0) {
+        sum = sum * gamma_buffer.data[oc] + beta_buffer.data[oc];
+        if (parameters.activation == 1) sum = max(sum, 0.0);
+        else if (parameters.activation == 2) sum = clamp(sum, 0.0, 6.0);
+    } else
+#endif
+    if (parameters.activation == 1) {
+        sum = max(sum, 0.0);
+    } else if (parameters.activation == 2) {
+        sum = clamp(sum, 0.0, 6.0);
     }
     output_buffer.data[
         (oc * parameters.output_height + oy) *

@@ -7,10 +7,13 @@
 #include "conv2d_grouped_spv.h"
 #include "conv2d_pointwise4_spv.h"
 #include "conv2d_pointwise_gemm_spv.h"
+#include "conv2d_pointwise_gemm_residual_spv.h"
 #include "conv2d_depthwise3_spv.h"
 #include "conv2d_spatial4_spv.h"
 #include "conv2d_spatial4_tiled_spv.h"
+#include "conv2d_spatial4_tiled_relu_spv.h"
 
+#include <stdexcept>
 #include <vector>
 
 namespace midas_native {
@@ -28,32 +31,42 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           midas_conv2d_grouped_spv,
           midas_conv2d_grouped_spv_size,
           4,
-          52)),
+          64)),
       conv_pointwise4_(context.create_pipeline(
           midas_conv2d_pointwise4_spv,
           midas_conv2d_pointwise4_spv_size,
           4,
-          52)),
+          64)),
       conv_pointwise_gemm_(context.create_pipeline(
           midas_conv2d_pointwise_gemm_spv,
           midas_conv2d_pointwise_gemm_spv_size,
           4,
-          52)),
+          64)),
+      conv_pointwise_gemm_residual_(context.create_pipeline(
+          midas_conv2d_pointwise_gemm_residual_spv,
+          midas_conv2d_pointwise_gemm_residual_spv_size,
+          5,
+          64)),
       conv_depthwise3_(context.create_pipeline(
           midas_conv2d_depthwise3_spv,
           midas_conv2d_depthwise3_spv_size,
           4,
-          52)),
+          64)),
       conv_spatial4_(context.create_pipeline(
           midas_conv2d_spatial4_spv,
           midas_conv2d_spatial4_spv_size,
           4,
-          52)),
+          64)),
       conv_spatial4_tiled_(context.create_pipeline(
           midas_conv2d_spatial4_tiled_spv,
           midas_conv2d_spatial4_tiled_spv_size,
           4,
-          52)),
+          64)),
+      conv_spatial4_tiled_relu_(context.create_pipeline(
+          midas_conv2d_spatial4_tiled_relu_spv,
+          midas_conv2d_spatial4_tiled_relu_spv_size,
+          4,
+          64)),
       batch_norm_activation_(context.create_pipeline(
           midas_batch_norm_activation_spv,
           midas_batch_norm_activation_spv_size,
@@ -77,10 +90,14 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     conv_.set_debug_name("midas_conv2d_grouped");
     conv_pointwise4_.set_debug_name("midas_conv2d_pointwise4");
     conv_pointwise_gemm_.set_debug_name("midas_conv2d_pointwise_gemm");
+    conv_pointwise_gemm_residual_.set_debug_name(
+        "midas_conv2d_pointwise_gemm_residual");
     conv_depthwise3_.set_debug_name("midas_conv2d_depthwise3");
     conv_spatial4_.set_debug_name("midas_conv2d_spatial4");
     conv_spatial4_tiled_.set_debug_name(
         "midas_conv2d_spatial4_tiled");
+    conv_spatial4_tiled_relu_.set_debug_name(
+        "midas_conv2d_spatial4_tiled_relu");
     batch_norm_activation_.set_debug_name(
         "midas_batch_norm_activation");
     activation_.set_debug_name("midas_activation");
@@ -105,7 +122,14 @@ void VulkanOperators::conv(
     std::int32_t padding_top,
     std::int32_t padding_left,
     std::uint32_t groups,
-    bool has_bias) {
+    bool has_bias,
+    const VulkanBuffer* gamma,
+    const VulkanBuffer* beta,
+    const VulkanBuffer* mean,
+    const VulkanBuffer* variance,
+    std::uint32_t activation,
+    bool relu_input,
+    const VulkanBuffer* residual) {
     struct Parameters {
         std::uint32_t input_width;
         std::uint32_t input_height;
@@ -120,11 +144,15 @@ void VulkanOperators::conv(
         std::int32_t padding_left;
         std::uint32_t groups;
         std::uint32_t has_bias;
+        std::uint32_t has_batch_norm;
+        std::uint32_t activation;
+        float epsilon;
     } parameters{
         input_width, input_height, input_channels,
         output_width, output_height, output_channels,
         kernel_height, kernel_width, stride,
-        padding_top, padding_left, groups, has_bias ? 1u : 0u};
+        padding_top, padding_left, groups, has_bias ? 1u : 0u,
+        gamma != nullptr ? 1u : 0u, activation, 0.001f};
     const bool pointwise =
         groups == 1 && kernel_height == 1 && kernel_width == 1 &&
         stride == 1 && padding_top == 0 && padding_left == 0 &&
@@ -139,19 +167,47 @@ void VulkanOperators::conv(
         spatial4 && stride == 1 && padding_top == 1 &&
         padding_left == 1 && input_width == output_width &&
         input_height == output_height;
-    context_.dispatch(
-        pointwise ? conv_pointwise_gemm_ :
+    if (relu_input && !spatial4_tiled) {
+        throw std::invalid_argument(
+            "fused input ReLU requires tiled spatial convolution");
+    }
+    if (residual != nullptr && !pointwise) {
+        throw std::invalid_argument(
+            "fused residual requires pointwise convolution");
+    }
+    if (gamma != nullptr || beta != nullptr ||
+        mean != nullptr || variance != nullptr) {
+        throw std::invalid_argument(
+            "convolution expects pre-folded batch normalization");
+    }
+    const VulkanPipeline& pipeline =
+        pointwise
+            ? (residual != nullptr
+                ? conv_pointwise_gemm_residual_
+                : conv_pointwise_gemm_)
+            :
         (depthwise ? conv_depthwise3_ :
-        (spatial4_tiled ? conv_spatial4_tiled_ :
-        (spatial4 ? conv_spatial4_ : conv_))),
-        {&output, &input, &weight, &bias},
+        (spatial4_tiled
+            ? (relu_input
+                ? conv_spatial4_tiled_relu_
+                : conv_spatial4_tiled_)
+            :
+        (spatial4 ? conv_spatial4_ : conv_)));
+    std::vector<const VulkanBuffer*> resources{
+        &output, &input, &weight, &bias};
+    if (residual != nullptr) {
+        resources.push_back(residual);
+    }
+    context_.dispatch(
+        pipeline,
+        resources,
         &parameters,
         sizeof(parameters),
         pointwise
-            ? divide_up(output_width * output_height, 32)
+            ? divide_up(output_width * output_height, 64)
             : divide_up(output_width, spatial4_tiled ? 16 : 8),
         pointwise
-            ? divide_up(output_channels, 32)
+            ? divide_up(output_channels, 64)
             : divide_up(output_height, 8),
         pointwise
             ? 1

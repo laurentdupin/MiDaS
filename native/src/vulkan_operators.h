@@ -27,7 +27,14 @@ public:
         std::int32_t padding_top,
         std::int32_t padding_left,
         std::uint32_t groups,
-        bool has_bias);
+        bool has_bias,
+        const VulkanBuffer* gamma = nullptr,
+        const VulkanBuffer* beta = nullptr,
+        const VulkanBuffer* mean = nullptr,
+        const VulkanBuffer* variance = nullptr,
+        std::uint32_t activation = 0,
+        bool relu_input = false,
+        const VulkanBuffer* residual = nullptr);
     void batch_norm_activation(
         VulkanBuffer& output,
         const VulkanBuffer& input,
@@ -63,9 +70,11 @@ private:
     VulkanPipeline conv_;
     VulkanPipeline conv_pointwise4_;
     VulkanPipeline conv_pointwise_gemm_;
+    VulkanPipeline conv_pointwise_gemm_residual_;
     VulkanPipeline conv_depthwise3_;
     VulkanPipeline conv_spatial4_;
     VulkanPipeline conv_spatial4_tiled_;
+    VulkanPipeline conv_spatial4_tiled_relu_;
     VulkanPipeline batch_norm_activation_;
     VulkanPipeline activation_;
     VulkanPipeline add_;
