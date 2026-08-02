@@ -19,11 +19,15 @@ public:
         const VulkanBuffer& source,
         std::uint32_t source_width,
         std::uint32_t source_height);
+    void normalize_relative(VulkanBuffer& depth, std::uint32_t count);
 
 private:
     VulkanContext& context_;
     VulkanPipeline preprocess_;
     VulkanPipeline resize_depth_;
+    VulkanPipeline resize_depth_buffer_;
+    VulkanPipeline reduce_minmax_;
+    VulkanPipeline normalize_relative_;
 };
 
 }  // namespace midas_native

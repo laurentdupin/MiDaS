@@ -77,6 +77,9 @@ if(MIDAS_WITH_VULKAN)
     midas_compile_shader(bilinear)
     midas_compile_shader(preprocess_texture)
     midas_compile_shader(resize_depth_image)
+    midas_compile_shader(resize_depth_buffer)
+    midas_compile_shader(reduce_minmax)
+    midas_compile_shader(normalize_relative)
 endif()
 
 add_library(midas_native SHARED
@@ -141,6 +144,18 @@ if(BUILD_TESTING)
     target_link_libraries(midas_c_abi_smoke PRIVATE midas_native)
     target_include_directories(midas_c_abi_smoke PRIVATE include)
     add_test(NAME midas_c_abi_smoke COMMAND midas_c_abi_smoke)
+    if(MIDAS_WITH_VULKAN)
+        add_executable(midas_depth_contract_test
+            tests/vulkan_depth_contract.cpp
+            src/gpu_io.cpp
+            src/vulkan.cpp
+            ${MIDAS_SHADER_HEADERS})
+        target_compile_features(midas_depth_contract_test PRIVATE cxx_std_17)
+        target_include_directories(midas_depth_contract_test PRIVATE
+            src "${MIDAS_GENERATED_DIR}")
+        target_link_libraries(midas_depth_contract_test PRIVATE Vulkan::Vulkan)
+        add_test(NAME midas_depth_contract_test COMMAND midas_depth_contract_test)
+    endif()
     add_executable(
         midas_harness_abi_smoke tests/harness_abi_smoke.c)
     target_link_libraries(
