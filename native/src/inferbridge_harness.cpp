@@ -7,14 +7,20 @@
 #endif
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <new>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
+
+namespace { class MidasHostWorker; }
 
 struct ibrh_runtime {
     std::string error;
@@ -30,11 +36,16 @@ struct ibrh_model {
     std::shared_ptr<midas_native::ExternalGpu> external_gpu;
 #endif
     uint32_t input_size = 256u;
+    std::shared_ptr<MidasHostWorker> host_worker;
+    std::shared_ptr<std::atomic<uint32_t>> host_admissions =
+        std::make_shared<std::atomic<uint32_t>>(0u);
     std::mutex submit_mutex;
 };
 
 struct ibrh_job {
     std::atomic<uint32_t> references{1u};
+    std::atomic<uint32_t> state{IBRH_JOB_QUEUED};
+    std::atomic<bool> cancel_requested{false};
 #if defined(MIDAS_WITH_VULKAN)
     std::shared_ptr<midas_native::ExternalJob> gpu_job;
 #endif
@@ -42,7 +53,11 @@ struct ibrh_job {
     uint64_t timestamp_ns = 0u;
     uint32_t width = 0u;
     uint32_t height = 0u;
+    std::shared_ptr<std::atomic<uint32_t>> admission;
     std::vector<uint8_t> depth;
+    ~ibrh_job() {
+        if (admission) admission->fetch_sub(1u);
+    }
 };
 
 
@@ -178,6 +193,141 @@ void release_job(ibrh_job* job) {
     if (job != nullptr && job->references.fetch_sub(1u) == 1u) delete job;
 }
 
+class MidasHostWorker final {
+public:
+    struct Work {
+        ibrh_job* job = nullptr;
+        midas_context* context = nullptr;
+        const uint8_t* pixels = nullptr;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint32_t row_stride = 0;
+        bool rgba = false;
+        uint32_t network_size = 0;
+        float* destination = nullptr;
+        uint32_t destination_stride = 0;
+    };
+
+    MidasHostWorker() : thread_([this] { run(); }) {}
+    ~MidasHostWorker() {
+        std::deque<Work> dropped;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+            dropped.swap(queue_);
+        }
+        for (Work& work : dropped) {
+            work.job->state.store(IBRH_JOB_CANCELLED);
+            release_job(work.job);
+        }
+        condition_.notify_all();
+        if (thread_.joinable()) thread_.join();
+    }
+
+    bool enqueue(Work work) {
+        retain_job(work.job);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (stopping_) {
+                release_job(work.job);
+                return false;
+            }
+            queue_.push_back(work);
+        }
+        condition_.notify_one();
+        return true;
+    }
+
+private:
+    void execute(const Work& work) {
+        midas_image_shape shape{};
+        midas_status result = midas_get_network_shape(
+            static_cast<int32_t>(work.width),
+            static_cast<int32_t>(work.height),
+            static_cast<int32_t>(work.network_size), &shape);
+        if (result != MIDAS_STATUS_OK)
+            throw std::runtime_error(midas_last_error());
+        const uint64_t output_elements =
+            static_cast<uint64_t>(shape.width) * shape.height;
+        std::vector<uint8_t> normalized(static_cast<size_t>(output_elements));
+        std::vector<uint8_t> converted;
+        const uint8_t* bgra = work.pixels;
+        uint32_t stride = work.row_stride;
+        if (work.rgba) {
+            converted.resize(
+                static_cast<size_t>(work.width) * work.height * 4u);
+            stride = work.width * 4u;
+            for (uint32_t y = 0; y < work.height; ++y) {
+                for (uint32_t x = 0; x < work.width; ++x) {
+                    const uint8_t* source = work.pixels +
+                        static_cast<uint64_t>(y) * work.row_stride + x * 4u;
+                    uint8_t* target = converted.data() +
+                        (static_cast<uint64_t>(y) * work.width + x) * 4u;
+                    target[0] = source[2];
+                    target[1] = source[1];
+                    target[2] = source[0];
+                    target[3] = source[3];
+                }
+            }
+            bgra = converted.data();
+        }
+        result = midas_inferbridge_bgra8_u8(
+            work.context, bgra, static_cast<int32_t>(work.width),
+            static_cast<int32_t>(work.height), stride,
+            static_cast<int32_t>(work.network_size),
+            normalized.data(), normalized.size());
+        if (result != MIDAS_STATUS_OK)
+            throw std::runtime_error(midas_last_error());
+        for (uint32_t y = 0; y < work.height; ++y) {
+            const uint32_t source_y = y * static_cast<uint32_t>(shape.height) /
+                work.height;
+            for (uint32_t x = 0; x < work.width; ++x) {
+                const uint32_t source_x = x * static_cast<uint32_t>(shape.width) /
+                    work.width;
+                work.destination[
+                    static_cast<uint64_t>(y) * work.destination_stride + x] =
+                    normalized[static_cast<uint64_t>(source_y) * shape.width +
+                        source_x] / 255.0f;
+            }
+        }
+    }
+
+    void run() {
+        for (;;) {
+            Work work;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                condition_.wait(lock, [&] { return stopping_ || !queue_.empty(); });
+                if (stopping_ && queue_.empty()) return;
+                work = queue_.front();
+                queue_.pop_front();
+            }
+            uint32_t queued = IBRH_JOB_QUEUED;
+            if (work.job->cancel_requested.load()) {
+                work.job->state.store(IBRH_JOB_CANCELLED);
+            } else if (work.job->state.compare_exchange_strong(
+                    queued, IBRH_JOB_RUNNING)) {
+                try {
+                    execute(work);
+                    uint32_t running = IBRH_JOB_RUNNING;
+                    work.job->state.compare_exchange_strong(running,
+                        work.job->cancel_requested.load() ?
+                            IBRH_JOB_CANCELLED : IBRH_JOB_COMPLETE);
+                } catch (...) {
+                    work.job->state.store(IBRH_JOB_FAILED);
+                }
+            }
+            release_job(work.job);
+        }
+    }
+
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    std::deque<Work> queue_;
+    bool stopping_ = false;
+    std::thread thread_;
+};
+
 ibrh_result IBRH_CALL query_capabilities(
     size_t capabilities_size, ibrh_capabilities* capabilities) {
     if (capabilities == nullptr) return IBRH_ERROR_INVALID_ARGUMENT;
@@ -186,14 +336,15 @@ ibrh_result IBRH_CALL query_capabilities(
     *capabilities = {};
     capabilities->struct_size = sizeof(*capabilities);
     capabilities->api_version = IBRH_CURRENT_API_VERSION;
-    capabilities->flags = IBRH_CAP_HOST_MEMORY;
+    capabilities->flags = IBRH_CAP_HOST_MEMORY |
+        IBRH_CAP_ASYNC_SUBMIT | IBRH_CAP_CANCELLATION;
     capabilities->input_domain_mask =
         1ull << IBRH_RESOURCE_DOMAIN_HOST;
     capabilities->output_domain_mask =
         1ull << IBRH_RESOURCE_DOMAIN_HOST;
     capabilities->maximum_inputs = 1u;
     capabilities->maximum_outputs = 1u;
-    capabilities->maximum_in_flight_jobs = 1u;
+    capabilities->maximum_in_flight_jobs = 3u;
 #if defined(MIDAS_WITH_VULKAN) && defined(_WIN32)
     try {
         if (midas_native::probe_external_gpu(0u).available) {
@@ -321,6 +472,7 @@ ibrh_result IBRH_CALL model_load(
             delete model;
             return fail(runtime, status_result(status), message);
         }
+        model->host_worker = std::make_shared<MidasHostWorker>();
     }
     *output = model;
     return IBRH_OK;
@@ -328,6 +480,7 @@ ibrh_result IBRH_CALL model_load(
 
 void IBRH_CALL model_unload(ibrh_model* model) {
     if (model == nullptr) return;
+    model->host_worker.reset();
 #if defined(MIDAS_WITH_VULKAN)
     model->external_gpu.reset();
 #endif
@@ -407,6 +560,22 @@ ibrh_result IBRH_CALL submit(
         destination.height != input.height ||
         destination.pixel_format != IBRH_PIXEL_DEPTH_FLOAT32)
         return IBRH_ERROR_INVALID_ARGUMENT;
+    const uint64_t input_bytes =
+        static_cast<uint64_t>(input.row_stride_bytes) * input.height;
+    const uint64_t output_bytes =
+        static_cast<uint64_t>(destination.row_stride_bytes) *
+            destination.height;
+    if (input.native_handle == 0u || destination.native_handle == 0u ||
+        static_cast<uint64_t>(input.row_stride_bytes) <
+            static_cast<uint64_t>(input.width) * 4u ||
+        static_cast<uint64_t>(destination.row_stride_bytes) <
+            static_cast<uint64_t>(destination.width) * sizeof(float) ||
+        destination.row_stride_bytes % sizeof(float) != 0u ||
+        input.byte_offset > input.byte_size ||
+        input_bytes > input.byte_size - input.byte_offset ||
+        destination.byte_offset > destination.byte_size ||
+        output_bytes > destination.byte_size - destination.byte_offset)
+        return IBRH_ERROR_INVALID_ARGUMENT;
 #if defined(MIDAS_WITH_VULKAN) && defined(_WIN32)
     if (input.domain == IBRH_RESOURCE_DOMAIN_D3D12) {
         if (!model->external_gpu || destination.domain != IBRH_RESOURCE_DOMAIN_D3D12 ||
@@ -447,44 +616,39 @@ ibrh_result IBRH_CALL submit(
         destination.domain != IBRH_RESOURCE_DOMAIN_HOST ||
         input.native_handle_type != IBRH_NATIVE_HANDLE_HOST_POINTER ||
         destination.native_handle_type != IBRH_NATIVE_HANDLE_HOST_POINTER ||
-        input.pixel_format != IBRH_PIXEL_BGRA8 ||
+        (input.pixel_format != IBRH_PIXEL_BGRA8 &&
+         input.pixel_format != IBRH_PIXEL_RGBA8) ||
         source.synchronization.kind != IBRH_SYNC_NONE ||
         target.synchronization.kind != IBRH_SYNC_NONE)
         return IBRH_ERROR_UNSUPPORTED_CAPABILITY;
-    midas_image_shape shape{};
-    midas_status status = midas_get_network_shape(
-        static_cast<int32_t>(input.width), static_cast<int32_t>(input.height),
-        static_cast<int32_t>(network_size), &shape);
-    if (status != MIDAS_STATUS_OK)
-        return fail(model->runtime, status_result(status), midas_last_error());
-    std::vector<uint8_t> temporary(
-        static_cast<size_t>(shape.width) * shape.height);
     const auto* bgra = reinterpret_cast<const uint8_t*>(
         static_cast<uintptr_t>(input.native_handle)) + input.byte_offset;
-    {
-        std::lock_guard<std::mutex> lock(model->submit_mutex);
-        status = midas_inferbridge_bgra8_u8(
-            model->context, bgra, static_cast<int32_t>(input.width),
-            static_cast<int32_t>(input.height), input.row_stride_bytes,
-            static_cast<int32_t>(network_size), temporary.data(), temporary.size());
-    }
-    if (status != MIDAS_STATUS_OK)
-        return fail(model->runtime, status_result(status), midas_last_error());
     auto* depth = reinterpret_cast<float*>(
         static_cast<uintptr_t>(destination.native_handle) + destination.byte_offset);
-    for (uint32_t y = 0; y < input.height; ++y)
-        for (uint32_t x = 0; x < input.width; ++x) {
-            const uint32_t sx = x * static_cast<uint32_t>(shape.width) / input.width;
-            const uint32_t sy = y * static_cast<uint32_t>(shape.height) / input.height;
-            depth[static_cast<uint64_t>(y) * input.width + x] =
-                temporary[static_cast<uint64_t>(sy) * shape.width + sx] / 255.0f;
-        }
     auto* job = new (std::nothrow) ibrh_job();
     if (!job) return IBRH_ERROR_INTERNAL;
+    uint32_t admitted = model->host_admissions->load();
+    while (admitted < 3u && !model->host_admissions->compare_exchange_weak(
+            admitted, admitted + 1u)) {}
+    if (admitted >= 3u) {
+        delete job;
+        return IBRH_ERROR_INVALID_STATE;
+    }
+    job->admission = model->host_admissions;
     job->source_frame_id = request->source_frame_id;
     job->timestamp_ns = request->timestamp_ns;
     job->width = input.width; job->height = input.height;
-    *output = job; return IBRH_OK;
+    if (!model->host_worker || !model->host_worker->enqueue({
+            job, model->context, bgra, input.width, input.height,
+            input.row_stride_bytes, input.pixel_format == IBRH_PIXEL_RGBA8,
+            network_size, depth,
+            static_cast<uint32_t>(
+                destination.row_stride_bytes / sizeof(float))})) {
+        delete job;
+        return IBRH_ERROR_INVALID_STATE;
+    }
+    *output = job;
+    return IBRH_OK;
 }
 
 ibrh_result IBRH_CALL job_poll(
@@ -509,7 +673,7 @@ ibrh_result IBRH_CALL job_poll(
         }
     } else
 #endif
-    status->state = IBRH_JOB_COMPLETE;
+    status->state = job->state.load();
     status->output_count = 1u;
     status->source_frame_id = job->source_frame_id;
     return IBRH_OK;
@@ -523,7 +687,8 @@ ibrh_result IBRH_CALL job_cancel(ibrh_job* job) {
         return IBRH_OK;
     }
 #endif
-    return IBRH_ERROR_INVALID_STATE;
+    job->cancel_requested.store(true);
+    return IBRH_OK;
 }
 
 void IBRH_CALL job_release(ibrh_job* job) {

@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-08-07",
+  "device": "Meta Quest 3S",
+  "gpu": "Adreno (TM) 740",
+  "androidAbi": "arm64-v8a",
+  "androidApi": 29,
+  "buildType": "Release",
+  "harnessApi": "2.0",
+  "capabilityTier": "host_memory",
+  "benchmarkConditions": {
+    "deepDesktopPackageStopped": true,
+    "thermalStatus": 0
+  },
+  "androidLibrary": {
+    "filename": "libmidas_native.so",
+    "sha256": "b03d767984bcdc5840a417bece1e6cf3324c8b316eb606f201affddaad6bd66d"
+  },
+  "model": {
+    "variant": "midas_v21_small_256",
+    "filename": "midas_v21_small_256.midas",
+    "bytes": 85659136,
+    "sha256": "56a76474a39600fb39b8f247bd4f20e13e79f05bbd5d818ab18e7c2cf11473fc"
+  },
+  "tensorBenchmark": {
+    "width": 256,
+    "height": 128,
+    "warmup": 3,
+    "iterations": 20,
+    "meanMs": 165.076,
+    "minimumMs": 162.462,
+    "maximumMs": 169.287,
+    "fps": 6.058
+  },
+  "inferBridgeHostBenchmark": {
+    "sourceWidth": 1920,
+    "sourceHeight": 1080,
+    "size": 256,
+    "networkWidth": 256,
+    "networkHeight": 128,
+    "warmup": 2,
+    "iterations": 10,
+    "meanMs": 178.056,
+    "minimumMs": 173.702,
+    "maximumMs": 192.611,
+    "fps": 5.616,
+    "maximumSubmitReturnMs": 0.020
+  },
+  "lifecycle": {
+    "correlatedFrames": 3,
+    "maximumSubmitReturnMs": 0.018,
+    "deterministicRepeatedOutput": true,
+    "finiteVariation": true,
+    "cancellation": "passed",
+    "modelUnloadRuntimeDestroyDlopenClose": "passed"
+  },
+  "limitations": [
+    "Android input and output currently use HOST InferBridge bindings",
+    "AHardwareBuffer zero-copy capability is not advertised",
+    "tensor timing includes one upload and one readback per inference"
+  ]
+}
