@@ -139,6 +139,10 @@ if(MIDAS_WITH_VULKAN)
     add_executable(midas_gpu_probe tools/gpu_probe.c)
     target_link_libraries(midas_gpu_probe PRIVATE midas_native)
     target_include_directories(midas_gpu_probe PRIVATE include)
+
+    add_executable(midas_benchmark tools/benchmark.c)
+    target_link_libraries(midas_benchmark PRIVATE midas_native)
+    target_include_directories(midas_benchmark PRIVATE include)
 endif()
 
 if(BUILD_TESTING)
