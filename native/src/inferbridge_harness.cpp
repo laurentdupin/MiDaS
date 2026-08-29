@@ -1,6 +1,8 @@
 
 #include "inferbridge_harness.h"
 
+#include <inferbridge/native_harness_precision.h>
+
 #include "midas_native.h"
 #if defined(MIDAS_WITH_VULKAN)
 #include "external_gpu.h"
@@ -431,6 +433,8 @@ ibrh_result IBRH_CALL model_load(
             "MiDaS model path is missing");
     const std::string path = copy_string(request->model_path);
     const std::string parameters = copy_string(request->parameters_json);
+    const inferbridge::native::ScopedPrecisionRequest precision_scope(
+        inferbridge::native::precision_from_parameters_json(parameters));
     std::string weights;
     if (json_string(parameters, "Weights", weights) &&
         weights != "midas_v21_small_256") {
@@ -597,11 +601,13 @@ ibrh_result IBRH_CALL submit(
         try {
             std::lock_guard<std::mutex> lock(model->submit_mutex);
             job->gpu_job = model->external_gpu->submit_texture({
-                static_cast<uintptr_t>(input.native_handle), input.width, input.height,
+                static_cast<uintptr_t>(input.native_handle),
+                input.auxiliary_handle, input.width, input.height,
                 input.pixel_format == IBRH_PIXEL_RGBA8, network_size,
                 static_cast<uintptr_t>(source.synchronization.native_handle),
                 source.synchronization.value,
                 static_cast<uintptr_t>(destination.native_handle),
+                destination.auxiliary_handle,
                 destination.width, destination.height,
                 static_cast<uintptr_t>(target.synchronization.native_handle),
                 target.synchronization.value,

@@ -31,6 +31,10 @@ public:
     }
 
 private:
+    struct QuantizedWeight {
+        VulkanBuffer packed;
+        VulkanBuffer scales;
+    };
     struct Tensor {
         std::uint32_t channels = 0;
         std::uint32_t height = 0;
@@ -81,6 +85,10 @@ private:
     VulkanContext context_;
     VulkanOperators operators_;
     std::unordered_map<std::string, VulkanBuffer> weights_;
+    std::unordered_map<std::string, VulkanBuffer> fp16_weights_;
+    std::unordered_map<std::string, QuantizedWeight> int8_weights_;
+    bool fp16_enabled_ = false;
+    bool int8_enabled_ = false;
     VulkanBuffer zero_bias_;
 };
 

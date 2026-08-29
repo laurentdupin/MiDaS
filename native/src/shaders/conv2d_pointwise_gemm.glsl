@@ -1,4 +1,8 @@
 #version 450
+#if defined(FP16_WEIGHTS)
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#endif
 
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 layout(set = 0, binding = 0, std430) writeonly buffer Output {
@@ -8,7 +12,11 @@ layout(set = 0, binding = 1, std430) readonly buffer Input {
     float data[];
 } input_buffer;
 layout(set = 0, binding = 2, std430) readonly buffer Weight {
+#if defined(FP16_WEIGHTS)
+    float16_t data[];
+#else
     float data[];
+#endif
 } weight_buffer;
 layout(set = 0, binding = 3, std430) readonly buffer Bias {
     float data[];
@@ -83,8 +91,8 @@ void main() {
                         index % K_TILE] =
                 channel < parameters.output_channels &&
                 input_channel < parameters.input_channels
-                ? weight_buffer.data[
-                      channel * parameters.input_channels + input_channel]
+                ? float(weight_buffer.data[
+                      channel * parameters.input_channels + input_channel])
                 : 0.0;
         }
         barrier();

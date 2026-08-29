@@ -8,10 +8,15 @@
 #include "conv2d_pointwise4_spv.h"
 #include "conv2d_pointwise_gemm_spv.h"
 #include "conv2d_pointwise_gemm_residual_spv.h"
+#include "conv2d_pointwise_gemm_fp16_spv.h"
+#include "conv2d_pointwise_gemm_residual_fp16_spv.h"
 #include "conv2d_depthwise3_spv.h"
 #include "conv2d_spatial4_spv.h"
 #include "conv2d_spatial4_tiled_spv.h"
 #include "conv2d_spatial4_tiled_relu_spv.h"
+#include "conv2d_spatial_int8_spv.h"
+#include "quantize_nchw_int8_spv.h"
+#include "reduce_absmax_spv.h"
 
 #include <stdexcept>
 #include <vector>
@@ -25,7 +30,10 @@ std::uint32_t divide_up(std::uint32_t value, std::uint32_t divisor) {
 
 }  // namespace
 
-VulkanOperators::VulkanOperators(VulkanContext& context)
+VulkanOperators::VulkanOperators(
+    VulkanContext& context,
+    bool enable_fp16,
+    bool enable_int8)
     : context_(context),
       conv_(context.create_pipeline(
           midas_conv2d_grouped_spv,
@@ -47,6 +55,32 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           midas_conv2d_pointwise_gemm_residual_spv_size,
           5,
           64)),
+      conv_pointwise_gemm_fp16_(enable_fp16 && context.supports_float16()
+          ? context.create_pipeline(
+              midas_conv2d_pointwise_gemm_fp16_spv,
+              midas_conv2d_pointwise_gemm_fp16_spv_size, 4, 64)
+          : VulkanPipeline{}),
+      conv_pointwise_gemm_residual_fp16_(
+          enable_fp16 && context.supports_float16()
+          ? context.create_pipeline(
+              midas_conv2d_pointwise_gemm_residual_fp16_spv,
+              midas_conv2d_pointwise_gemm_residual_fp16_spv_size, 5, 64)
+          : VulkanPipeline{}),
+      reduce_absmax_(enable_int8 && context.supports_packed_int8_dot()
+          ? context.create_pipeline(
+              midas_reduce_absmax_spv,
+              midas_reduce_absmax_spv_size, 2, 8)
+          : VulkanPipeline{}),
+      quantize_nchw_int8_(enable_int8 && context.supports_packed_int8_dot()
+          ? context.create_pipeline(
+              midas_quantize_nchw_int8_spv,
+              midas_quantize_nchw_int8_spv_size, 3, 12)
+          : VulkanPipeline{}),
+      conv3x3_int8_(enable_int8 && context.supports_packed_int8_dot()
+          ? context.create_pipeline(
+              midas_conv2d_spatial_int8_spv,
+              midas_conv2d_spatial_int8_spv_size, 6, 20)
+          : VulkanPipeline{}),
       conv_depthwise3_(context.create_pipeline(
           midas_conv2d_depthwise3_spv,
           midas_conv2d_depthwise3_spv_size,
@@ -92,6 +126,17 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     conv_pointwise_gemm_.set_debug_name("midas_conv2d_pointwise_gemm");
     conv_pointwise_gemm_residual_.set_debug_name(
         "midas_conv2d_pointwise_gemm_residual");
+    if (enable_fp16 && context.supports_float16()) {
+        conv_pointwise_gemm_fp16_.set_debug_name(
+            "midas_conv2d_pointwise_gemm_fp16");
+        conv_pointwise_gemm_residual_fp16_.set_debug_name(
+            "midas_conv2d_pointwise_gemm_residual_fp16");
+    }
+    if (enable_int8 && context.supports_packed_int8_dot()) {
+        reduce_absmax_.set_debug_name("midas_reduce_absmax_int8");
+        quantize_nchw_int8_.set_debug_name("midas_quantize_nchw_int8");
+        conv3x3_int8_.set_debug_name("midas_conv3x3_int8");
+    }
     conv_depthwise3_.set_debug_name("midas_conv2d_depthwise3");
     conv_spatial4_.set_debug_name("midas_conv2d_spatial4");
     conv_spatial4_tiled_.set_debug_name(
@@ -103,6 +148,76 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     activation_.set_debug_name("midas_activation");
     add_.set_debug_name("midas_add");
     bilinear_.set_debug_name("midas_bilinear");
+}
+
+void VulkanOperators::conv3x3_int8(
+    VulkanBuffer& output,
+    const VulkanBuffer& input,
+    const VulkanBuffer& packed_weight,
+    const VulkanBuffer& weight_scales,
+    const VulkanBuffer& bias,
+    std::uint32_t width,
+    std::uint32_t height,
+    std::uint32_t input_channels,
+    std::uint32_t output_channels,
+    bool has_bias) {
+    if (!context_.supports_packed_int8_dot() || input_channels % 4u != 0u) {
+        throw std::runtime_error(
+            "accelerated packed INT8 convolution is unavailable");
+    }
+    const std::uint32_t count = width * height * input_channels;
+    const std::uint32_t groups =
+        std::min(256u, divide_up(count, 4096u));
+    VulkanBuffer input_scale =
+        context_.create_device_buffer(sizeof(float));
+    struct ReductionParameters {
+        std::uint32_t count;
+        float divisor;
+    };
+    if (groups == 1u) {
+        const ReductionParameters parameters{count, 127.0f};
+        context_.dispatch(
+            reduce_absmax_, {&input, &input_scale},
+            &parameters, sizeof(parameters), 1u);
+    } else {
+        VulkanBuffer partial = context_.create_device_buffer(
+            static_cast<std::uint64_t>(groups) * sizeof(float));
+        const ReductionParameters first{count, 1.0f};
+        context_.dispatch(
+            reduce_absmax_, {&input, &partial},
+            &first, sizeof(first), groups);
+        const ReductionParameters final{groups, 127.0f};
+        context_.dispatch(
+            reduce_absmax_, {&partial, &input_scale},
+            &final, sizeof(final), 1u);
+    }
+    VulkanBuffer packed_input = context_.create_device_buffer(
+        static_cast<std::uint64_t>(width) * height *
+        (input_channels / 4u) * sizeof(std::uint32_t));
+    struct QuantizeParameters {
+        std::uint32_t width;
+        std::uint32_t height;
+        std::uint32_t channels;
+    } quantize{width, height, input_channels};
+    context_.dispatch(
+        quantize_nchw_int8_, {&packed_input, &input, &input_scale},
+        &quantize, sizeof(quantize),
+        divide_up(width * height * (input_channels / 4u), 256u));
+    struct ConvolutionParameters {
+        std::uint32_t width;
+        std::uint32_t height;
+        std::uint32_t input_channels;
+        std::uint32_t output_channels;
+        std::uint32_t has_bias;
+    } convolution{
+        width, height, input_channels, output_channels,
+        has_bias ? 1u : 0u};
+    context_.dispatch(
+        conv3x3_int8_,
+        {&output, &packed_input, &packed_weight, &input_scale,
+         &weight_scales, &bias},
+        &convolution, sizeof(convolution),
+        divide_up(width, 8u), divide_up(height, 8u), output_channels);
 }
 
 void VulkanOperators::conv(
@@ -129,7 +244,8 @@ void VulkanOperators::conv(
     const VulkanBuffer* variance,
     std::uint32_t activation,
     bool relu_input,
-    const VulkanBuffer* residual) {
+    const VulkanBuffer* residual,
+    bool fp16_weight) {
     struct Parameters {
         std::uint32_t input_width;
         std::uint32_t input_height;
@@ -183,8 +299,10 @@ void VulkanOperators::conv(
     const VulkanPipeline& pipeline =
         pointwise
             ? (residual != nullptr
-                ? conv_pointwise_gemm_residual_
-                : conv_pointwise_gemm_)
+                ? (fp16_weight ? conv_pointwise_gemm_residual_fp16_
+                               : conv_pointwise_gemm_residual_)
+                : (fp16_weight ? conv_pointwise_gemm_fp16_
+                               : conv_pointwise_gemm_))
             :
         (depthwise ? conv_depthwise3_ :
         (spatial4_tiled

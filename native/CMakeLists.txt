@@ -54,6 +54,7 @@ if(MIDAS_WITH_VULKAN)
             ${MIDAS_SHADER_HEADERS} "${HEADER}" PARENT_SCOPE)
     endfunction()
 
+
     midas_compile_shader(
         conv2d_grouped conv2d_grouped -DNO_BATCH_NORM=1)
     midas_compile_shader(
@@ -63,6 +64,12 @@ if(MIDAS_WITH_VULKAN)
     midas_compile_shader(
         conv2d_pointwise_gemm_residual conv2d_pointwise_gemm
         -DADD_RESIDUAL=1)
+    midas_compile_shader(
+        conv2d_pointwise_gemm_fp16 conv2d_pointwise_gemm
+        "-DNO_BATCH_NORM=1;-DFP16_WEIGHTS=1")
+    midas_compile_shader(
+        conv2d_pointwise_gemm_residual_fp16 conv2d_pointwise_gemm
+        "-DADD_RESIDUAL=1;-DFP16_WEIGHTS=1")
     midas_compile_shader(
         conv2d_depthwise3 conv2d_depthwise3 -DNO_BATCH_NORM=1)
     midas_compile_shader(
@@ -82,6 +89,13 @@ if(MIDAS_WITH_VULKAN)
     midas_compile_shader(resize_depth_buffer)
     midas_compile_shader(reduce_minmax)
     midas_compile_shader(normalize_relative)
+    foreach(SHARED_SHADER reduce_absmax quantize_nchw_int8 conv2d_spatial_int8)
+        inferbridge_compile_native_support_shader(
+            NAME "${SHARED_SHADER}" PREFIX midas
+            GENERATED_DIR "${MIDAS_GENERATED_DIR}"
+            EMBED_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
+            OUT_VAR MIDAS_SHADER_HEADERS)
+    endforeach()
 endif()
 
 add_library(midas_native SHARED

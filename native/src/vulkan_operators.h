@@ -8,7 +8,10 @@ namespace midas_native {
 
 class VulkanOperators {
 public:
-    explicit VulkanOperators(VulkanContext& context);
+    VulkanOperators(
+        VulkanContext& context,
+        bool enable_fp16,
+        bool enable_int8);
 
     void conv(
         VulkanBuffer& output,
@@ -34,7 +37,19 @@ public:
         const VulkanBuffer* variance = nullptr,
         std::uint32_t activation = 0,
         bool relu_input = false,
-        const VulkanBuffer* residual = nullptr);
+        const VulkanBuffer* residual = nullptr,
+        bool fp16_weight = false);
+    void conv3x3_int8(
+        VulkanBuffer& output,
+        const VulkanBuffer& input,
+        const VulkanBuffer& packed_weight,
+        const VulkanBuffer& weight_scales,
+        const VulkanBuffer& bias,
+        std::uint32_t width,
+        std::uint32_t height,
+        std::uint32_t input_channels,
+        std::uint32_t output_channels,
+        bool has_bias);
     void batch_norm_activation(
         VulkanBuffer& output,
         const VulkanBuffer& input,
@@ -71,6 +86,11 @@ private:
     VulkanPipeline conv_pointwise4_;
     VulkanPipeline conv_pointwise_gemm_;
     VulkanPipeline conv_pointwise_gemm_residual_;
+    VulkanPipeline conv_pointwise_gemm_fp16_;
+    VulkanPipeline conv_pointwise_gemm_residual_fp16_;
+    VulkanPipeline reduce_absmax_;
+    VulkanPipeline quantize_nchw_int8_;
+    VulkanPipeline conv3x3_int8_;
     VulkanPipeline conv_depthwise3_;
     VulkanPipeline conv_spatial4_;
     VulkanPipeline conv_spatial4_tiled_;

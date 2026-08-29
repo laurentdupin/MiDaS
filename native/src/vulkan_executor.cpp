@@ -1,5 +1,7 @@
 #include "vulkan_executor.h"
 
+#include <inferbridge/native_harness_precision.h>
+
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -39,11 +41,28 @@ VulkanExecutor::VulkanExecutor(
     std::uint32_t device_index)
     : model_(model_path, MIDAS_MODEL_V21_SMALL_256),
       context_(device_index),
-      operators_(context_),
+      operators_(
+          context_,
+          inferbridge::native::requested_precision() ==
+              inferbridge::native::Precision::fp16 ||
+              inferbridge::native::requested_precision() ==
+                  inferbridge::native::Precision::automatic,
+          inferbridge::native::requested_precision() ==
+              inferbridge::native::Precision::int8),
       zero_bias_(context_.create_device_buffer(sizeof(float))) {
+    const auto precision = inferbridge::native::require_supported_precision(
+        inferbridge::native::requested_precision(),
+        {context_.supports_float16(), context_.supports_packed_int8_dot()},
+        context_.supports_float16()
+            ? inferbridge::native::Precision::fp16
+            : inferbridge::native::Precision::fp32);
+    fp16_enabled_ = precision == inferbridge::native::Precision::fp16;
+    int8_enabled_ = precision == inferbridge::native::Precision::int8;
     const float zero = 0.0f;
     context_.upload(zero_bias_, &zero, sizeof(zero));
     weights_.reserve(model_.tensor_count() + 64);
+    fp16_weights_.reserve(model_.tensor_count() + 64);
+    int8_weights_.reserve(model_.tensor_count() + 64);
     for (std::string_view name_view : model_.tensor_names()) {
         const std::string name(name_view);
         const TensorView& tensor = model_.tensor(name);
@@ -55,6 +74,37 @@ VulkanExecutor::VulkanExecutor(
             static_cast<std::size_t>(
                 tensor.elements * sizeof(float)));
         weights_.emplace(name, std::move(buffer));
+        if (fp16_enabled_ && tensor.rank == 4 &&
+            tensor.dimensions[1] % 4u == 0u) {
+            const auto packed = inferbridge::native::pack_fp16(
+                tensor.data, static_cast<std::size_t>(tensor.elements));
+            VulkanBuffer half = context_.create_device_buffer(
+                packed.size() * sizeof(std::uint16_t));
+            context_.upload(
+                half, packed.data(), packed.size() * sizeof(std::uint16_t));
+            fp16_weights_.emplace(name, std::move(half));
+        }
+        if (int8_enabled_ && tensor.rank == 4 &&
+            tensor.dimensions[1] % 4u == 0u &&
+            tensor.dimensions[2] == 3u && tensor.dimensions[3] == 3u) {
+            const auto quantized =
+                inferbridge::native::quantize_int8_convolution_oihw(
+                    tensor.data,
+                    static_cast<std::size_t>(tensor.dimensions[0]),
+                    static_cast<std::size_t>(tensor.dimensions[1]), 3u, 3u);
+            QuantizedWeight gpu{
+                context_.create_device_buffer(
+                    quantized.packed.size() * sizeof(std::uint32_t)),
+                context_.create_device_buffer(
+                    quantized.scales.size() * sizeof(float))};
+            context_.upload(
+                gpu.packed, quantized.packed.data(),
+                quantized.packed.size() * sizeof(std::uint32_t));
+            context_.upload(
+                gpu.scales, quantized.scales.data(),
+                quantized.scales.size() * sizeof(float));
+            int8_weights_.emplace(name, std::move(gpu));
+        }
     }
     const auto fold_batch_norm =
         [&](const std::string& weight_name, const std::string& prefix) {
@@ -109,6 +159,34 @@ VulkanExecutor::VulkanExecutor(
             weight_name + ".folded", std::move(folded_buffer));
         weights_.emplace(
             weight_name + ".folded_bias", std::move(bias_buffer));
+        if (fp16_enabled_ && source.dimensions[1] % 4u == 0u) {
+            const auto packed = inferbridge::native::pack_fp16(
+                folded.data(), folded.size());
+            VulkanBuffer half = context_.create_device_buffer(
+                packed.size() * sizeof(std::uint16_t));
+            context_.upload(
+                half, packed.data(), packed.size() * sizeof(std::uint16_t));
+            fp16_weights_.emplace(
+                weight_name + ".folded", std::move(half));
+        }
+        if (int8_enabled_ && source.dimensions[1] % 4u == 0u &&
+            source.dimensions[2] == 3u && source.dimensions[3] == 3u) {
+            const auto quantized =
+                inferbridge::native::quantize_int8_convolution_oihw(
+                    folded.data(), output_channels,
+                    static_cast<std::size_t>(source.dimensions[1]), 3u, 3u);
+            QuantizedWeight gpu{
+                context_.create_device_buffer(
+                    quantized.packed.size() * sizeof(std::uint32_t)),
+                context_.create_device_buffer(
+                    quantized.scales.size() * sizeof(float))};
+            context_.upload(gpu.packed, quantized.packed.data(),
+                quantized.packed.size() * sizeof(std::uint32_t));
+            context_.upload(gpu.scales, quantized.scales.data(),
+                quantized.scales.size() * sizeof(float));
+            int8_weights_.emplace(
+                weight_name + ".folded", std::move(gpu));
+        }
     };
     fold_batch_norm(
         "pretrained.layer1.0.weight", "pretrained.layer1.1");
@@ -210,6 +288,28 @@ VulkanExecutor::Tensor VulkanExecutor::conv(
         convolution_bias = &weight(weight_name + ".folded_bias");
         convolution_has_bias = true;
     }
+    const std::string selected_weight_name = batch_norm_prefix != nullptr
+        ? weight_name + ".folded" : weight_name;
+    const auto half_weight = fp16_weights_.find(selected_weight_name);
+    const auto int8_weight = int8_weights_.find(selected_weight_name);
+    const bool use_int8_weight = int8_enabled_ && groups == 1u &&
+        kernel_h == 3u && kernel_w == 3u && stride == 1u &&
+        padding_top == 1 && padding_left == 1 &&
+        input.width == output.width && input.height == output.height &&
+        input.channels % 4u == 0u && !relu_input && residual == nullptr &&
+        activation == 0u && int8_weight != int8_weights_.end();
+    if (use_int8_weight) {
+        operators_.conv3x3_int8(
+            output.buffer, input.buffer, int8_weight->second.packed,
+            int8_weight->second.scales, *convolution_bias,
+            input.width, input.height, input.channels, output.channels,
+            convolution_has_bias);
+        return output;
+    }
+    const bool use_fp16_weight = fp16_enabled_ && groups == 1u &&
+        kernel_h == 1u && kernel_w == 1u && stride == 1u &&
+        half_weight != fp16_weights_.end();
+    if (use_fp16_weight) convolution_weight = &half_weight->second;
     operators_.conv(
         output.buffer,
         input.buffer,
@@ -234,7 +334,8 @@ VulkanExecutor::Tensor VulkanExecutor::conv(
         nullptr,
         activation,
         relu_input,
-        residual);
+        residual,
+        use_fp16_weight);
     return output;
 }
 
