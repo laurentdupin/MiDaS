@@ -1,6 +1,7 @@
 #pragma once
 
 #include "vulkan.h"
+#include <inferbridge/native_harness_int8_workspace.h>
 
 #include <cstdint>
 
@@ -82,6 +83,7 @@ public:
 
 private:
     VulkanContext& context_;
+    inferbridge::native::Int8ActivationWorkspace<VulkanBuffer> int8_workspace_;
     VulkanPipeline conv_;
     VulkanPipeline conv_pointwise4_;
     VulkanPipeline conv_pointwise_gemm_;

@@ -168,8 +168,10 @@ void VulkanOperators::conv3x3_int8(
     const std::uint32_t count = width * height * input_channels;
     const std::uint32_t groups =
         std::min(256u, divide_up(count, 4096u));
-    VulkanBuffer input_scale =
-        context_.create_device_buffer(sizeof(float));
+    VulkanBuffer& input_scale = int8_workspace_.scales(
+        sizeof(float), [this](std::uint64_t bytes) {
+            return context_.create_device_buffer(bytes);
+        });
     struct ReductionParameters {
         std::uint32_t count;
         float divisor;
@@ -180,8 +182,11 @@ void VulkanOperators::conv3x3_int8(
             reduce_absmax_, {&input, &input_scale},
             &parameters, sizeof(parameters), 1u);
     } else {
-        VulkanBuffer partial = context_.create_device_buffer(
-            static_cast<std::uint64_t>(groups) * sizeof(float));
+        VulkanBuffer& partial = int8_workspace_.partial(
+            static_cast<std::uint64_t>(groups) * sizeof(float),
+            [this](std::uint64_t bytes) {
+                return context_.create_device_buffer(bytes);
+            });
         const ReductionParameters first{count, 1.0f};
         context_.dispatch(
             reduce_absmax_, {&input, &partial},
@@ -191,9 +196,12 @@ void VulkanOperators::conv3x3_int8(
             reduce_absmax_, {&partial, &input_scale},
             &final, sizeof(final), 1u);
     }
-    VulkanBuffer packed_input = context_.create_device_buffer(
+    VulkanBuffer& packed_input = int8_workspace_.packed(
         static_cast<std::uint64_t>(width) * height *
-        (input_channels / 4u) * sizeof(std::uint32_t));
+            (input_channels / 4u) * sizeof(std::uint32_t),
+        [this](std::uint64_t bytes) {
+            return context_.create_device_buffer(bytes);
+        });
     struct QuantizeParameters {
         std::uint32_t width;
         std::uint32_t height;
