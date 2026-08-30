@@ -79,6 +79,10 @@ MIDAS_API midas_status MIDAS_CALL midas_create_vulkan(
     midas_model_kind model,
     int32_t vulkan_device_index,
     midas_context** context);
+MIDAS_API midas_status MIDAS_CALL midas_create_metal(
+    const char* model_path_utf8,
+    midas_model_kind model,
+    midas_context** context);
 MIDAS_API midas_status MIDAS_CALL midas_probe_gpu_capabilities(
     int32_t vulkan_device_index,
     midas_gpu_capabilities* capabilities);

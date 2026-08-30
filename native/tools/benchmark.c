@@ -55,8 +55,13 @@ int main(int argc, char** argv) {
 
     midas_context* context = NULL;
     const double load_begin = now_ms();
+#if defined(__APPLE__)
+    midas_status status = midas_create_metal(
+        argv[1], MIDAS_MODEL_V21_SMALL_256, &context);
+#else
     midas_status status = midas_create_vulkan(
         argv[1], MIDAS_MODEL_V21_SMALL_256, 0, &context);
+#endif
     const double load_ms = now_ms() - load_begin;
     if (status != MIDAS_STATUS_OK) {
         fprintf(stderr, "load failed: %s\n", midas_last_error());

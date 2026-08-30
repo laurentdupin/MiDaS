@@ -12,6 +12,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(MIDAS_WITH_VULKAN
     "Build the dependency-free Vulkan executor" ON)
+option(MIDAS_WITH_METAL "Build the Apple Metal/MPSGraph executor" ${APPLE})
 
 if(MIDAS_WITH_VULKAN)
     find_package(Vulkan REQUIRED COMPONENTS glslc)
@@ -112,7 +113,8 @@ target_compile_definitions(
         MIDAS_BUILD_DLL
         INFERBRIDGE_HARNESS_BUILDING_LIBRARY)
 target_compile_definitions(midas_native PRIVATE
-    $<$<BOOL:${MIDAS_WITH_VULKAN}>:MIDAS_WITH_VULKAN=1>)
+    $<$<BOOL:${MIDAS_WITH_VULKAN}>:MIDAS_WITH_VULKAN=1>
+    $<$<BOOL:${MIDAS_WITH_METAL}>:MIDAS_WITH_METAL=1>)
 set_target_properties(midas_native PROPERTIES
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN YES)
@@ -120,6 +122,16 @@ if(MSVC)
     target_compile_options(midas_native PRIVATE /W4 /permissive-)
     set_property(TARGET midas_native PROPERTY
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
+if(MIDAS_WITH_METAL)
+    if(NOT APPLE)
+        message(FATAL_ERROR "MIDAS_WITH_METAL requires an Apple platform")
+    endif()
+    target_sources(midas_native PRIVATE src/metal_executor.mm)
+    target_link_libraries(midas_native PRIVATE
+        "-framework Foundation" "-framework Metal"
+        "-framework MetalPerformanceShadersGraph")
 endif()
 
 if(MIDAS_WITH_VULKAN)
@@ -153,7 +165,9 @@ if(MIDAS_WITH_VULKAN)
     add_executable(midas_gpu_probe tools/gpu_probe.c)
     target_link_libraries(midas_gpu_probe PRIVATE midas_native)
     target_include_directories(midas_gpu_probe PRIVATE include)
+endif()
 
+if(MIDAS_WITH_VULKAN OR MIDAS_WITH_METAL)
     add_executable(midas_benchmark tools/benchmark.c)
     target_link_libraries(midas_benchmark PRIVATE midas_native)
     target_include_directories(midas_benchmark PRIVATE include)
@@ -196,6 +210,20 @@ if(BUILD_TESTING)
         COMMAND midas_harness_full_graph)
     set_tests_properties(
         midas_harness_full_graph PROPERTIES SKIP_RETURN_CODE 77)
+
+    if(APPLE AND MIDAS_WITH_METAL)
+        add_executable(
+            midas_metal_full_graph tests/metal_full_graph.cpp)
+        target_link_libraries(
+            midas_metal_full_graph PRIVATE midas_native)
+        target_include_directories(
+            midas_metal_full_graph PRIVATE include)
+        add_test(
+            NAME midas_metal_full_graph
+            COMMAND midas_metal_full_graph)
+        set_tests_properties(
+            midas_metal_full_graph PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
 
     if(WIN32 AND MIDAS_WITH_VULKAN)
         add_executable(

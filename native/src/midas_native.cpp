@@ -5,6 +5,9 @@
 #if defined(MIDAS_WITH_VULKAN)
 #  include "vulkan_executor.h"
 #endif
+#if defined(MIDAS_WITH_METAL)
+#  include "metal_executor.h"
+#endif
 
 #include <algorithm>
 #include <memory>
@@ -18,6 +21,9 @@ struct midas_context {
     std::unique_ptr<midas_native::CpuExecutor> executor;
 #if defined(MIDAS_WITH_VULKAN)
     std::unique_ptr<midas_native::VulkanExecutor> vulkan_executor;
+#endif
+#if defined(MIDAS_WITH_METAL)
+    std::unique_ptr<midas_native::MetalExecutor> metal_executor;
 #endif
     midas_native::ImageScratch image_scratch;
     std::vector<std::uint8_t> packed_capture;
@@ -34,6 +40,12 @@ struct midas_context {
         if (vulkan_executor) {
             vulkan_executor->infer(
                 input, width, height, depth, depth_elements);
+            return;
+        }
+#endif
+#if defined(MIDAS_WITH_METAL)
+        if (metal_executor) {
+            metal_executor->infer(input, width, height, depth, depth_elements);
             return;
         }
 #endif
@@ -147,6 +159,26 @@ midas_status MIDAS_CALL midas_create_vulkan(
     return fail(
         MIDAS_STATUS_VULKAN_UNAVAILABLE,
         "this DLL was built without Vulkan");
+#endif
+}
+
+midas_status MIDAS_CALL midas_create_metal(
+    const char* model_path_utf8, midas_model_kind model,
+    midas_context** context) {
+    if (context == nullptr) return fail(MIDAS_STATUS_INVALID_ARGUMENT, "context is null");
+    *context = nullptr;
+    if (model_path_utf8 == nullptr || model_path_utf8[0] == '\0' ||
+        model != MIDAS_MODEL_V21_SMALL_256)
+        return fail(MIDAS_STATUS_INVALID_ARGUMENT, "invalid create options");
+#if defined(MIDAS_WITH_METAL)
+    return protect([&] {
+        auto result = std::make_unique<midas_context>();
+        result->metal_executor =
+            std::make_unique<midas_native::MetalExecutor>(model_path_utf8);
+        *context = result.release();
+    });
+#else
+    return fail(MIDAS_STATUS_UNSUPPORTED, "this library was built without Metal");
 #endif
 }
 

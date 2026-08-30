@@ -471,10 +471,15 @@ ibrh_result IBRH_CALL model_load(
     } else
 #endif
     {
+#if defined(MIDAS_WITH_METAL)
+        const midas_status status = midas_create_metal(
+            path.c_str(), MIDAS_MODEL_V21_SMALL_256, &model->context);
+#else
         const midas_status status = midas_create_vulkan(
             path.c_str(), MIDAS_MODEL_V21_SMALL_256,
             static_cast<uint32_t>(runtime->vulkan_device_index),
             &model->context);
+#endif
         if (status != MIDAS_STATUS_OK) {
             const std::string message =
                 std::string("MiDaS model load failed: ") + midas_last_error();
