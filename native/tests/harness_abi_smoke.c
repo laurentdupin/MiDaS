@@ -23,7 +23,7 @@ int main(void) {
     CHECK(
         api.query_capabilities(sizeof(capabilities), &capabilities) ==
         IBRH_OK);
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__APPLE__)
     CHECK(
         capabilities.flags ==
         (IBRH_CAP_HOST_MEMORY | IBRH_CAP_ASYNC_SUBMIT |
@@ -33,14 +33,32 @@ int main(void) {
     CHECK(
         capabilities.input_domain_mask ==
         ((1ull << IBRH_RESOURCE_DOMAIN_HOST) |
-         (1ull << IBRH_RESOURCE_DOMAIN_D3D12)));
+         (1ull <<
+#if defined(_WIN32)
+          IBRH_RESOURCE_DOMAIN_D3D12
+#else
+          IBRH_RESOURCE_DOMAIN_METAL
+#endif
+         )));
     CHECK(
         capabilities.output_domain_mask ==
         ((1ull << IBRH_RESOURCE_DOMAIN_HOST) |
-         (1ull << IBRH_RESOURCE_DOMAIN_D3D12)));
+         (1ull <<
+#if defined(_WIN32)
+          IBRH_RESOURCE_DOMAIN_D3D12
+#else
+          IBRH_RESOURCE_DOMAIN_METAL
+#endif
+         )));
     CHECK(
         capabilities.synchronization_mask ==
-        (1ull << IBRH_SYNC_D3D12_FENCE));
+        (1ull <<
+#if defined(_WIN32)
+         IBRH_SYNC_D3D12_FENCE
+#else
+         IBRH_SYNC_METAL_SHARED_EVENT
+#endif
+        ));
     CHECK(capabilities.maximum_in_flight_jobs == 3u);
 #else
     CHECK(
@@ -59,6 +77,8 @@ int main(void) {
     CHECK(
         capabilities.harness_id.size ==
         strlen("inferbridge.midas.native"));
+    CHECK(capabilities.harness_version.size == strlen("1.2.0"));
+    CHECK(memcmp(capabilities.harness_version.data, "1.2.0", 5u) == 0);
 
     ibrh_runtime_create_request request = {0};
     request.struct_size = sizeof(request);

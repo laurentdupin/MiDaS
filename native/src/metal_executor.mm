@@ -1,4 +1,7 @@
 #include "metal_executor.h"
+
+#include "image.h"
+#include "inferbridge/native_harness_metal_texture.h"
 #include "model.h"
 #include <inferbridge/native_harness_precision.h>
 
@@ -100,6 +103,26 @@ public:
         output_ = fp16_ ? [graph_ castTensor:path.value
                                       toType:MPSDataTypeFloat32 name:@"depth"]
                         : path.value;
+    }
+
+    void build_presentation() {
+        build();
+        NSArray<NSNumber*>* axes = @[@0, @1, @2, @3];
+        MPSGraphTensor* minimum = [graph_
+            reductionMinimumWithTensor:output_ axes:axes name:nil];
+        MPSGraphTensor* maximum = [graph_
+            reductionMaximumWithTensor:output_ axes:axes name:nil];
+        MPSGraphTensor* span = [graph_
+            subtractionWithPrimaryTensor:maximum
+                          secondaryTensor:minimum name:nil];
+        MPSGraphTensor* epsilon = [graph_ constantWithScalar:1.0e-12
+            dataType:MPSDataTypeFloat32];
+        span = [graph_ maximumWithPrimaryTensor:span
+                                secondaryTensor:epsilon name:nil];
+        output_ = [graph_ divisionWithPrimaryTensor:[graph_
+            subtractionWithPrimaryTensor:output_
+                          secondaryTensor:minimum name:nil]
+                                      secondaryTensor:span name:@"depth_normalized"];
     }
 
 private:
@@ -250,6 +273,21 @@ struct Plan {
     MPSGraphExecutable* executable = nil;
 };
 
+class MetalExternalJob final : public ExternalJob {
+public:
+    explicit MetalExternalJob(
+        std::shared_ptr<inferbridge::native_harness::metal::Submission> value)
+        : submission_(std::move(value)) {}
+    ExternalJobState state() const override {
+        if (submission_->cancelled()) return ExternalJobState::cancelled;
+        return submission_->complete() ? ExternalJobState::complete :
+            ExternalJobState::running;
+    }
+    void cancel() override { submission_->cancel(); }
+private:
+    std::shared_ptr<inferbridge::native_harness::metal::Submission> submission_;
+};
+
 }  // namespace
 
 class MetalExecutor::Impl {
@@ -266,6 +304,8 @@ public:
             precision == inferbridge::native::Precision::automatic;
         if (precision == inferbridge::native::Precision::int8)
             throw std::invalid_argument("MiDaS Metal does not support INT8");
+        texture_pipeline_ = std::make_unique<
+            inferbridge::native_harness::metal::TexturePipeline>(device_);
     }
 
     void infer(const float* input, std::uint32_t width, std::uint32_t height,
@@ -295,6 +335,58 @@ public:
         }
     }
 
+    std::shared_ptr<ExternalJob> submit_texture(
+        const ExternalTextureRequest& request) {
+        const ImageShape network = network_shape(
+            static_cast<int>(request.width),
+            static_cast<int>(request.height),
+            static_cast<int>(request.input_size));
+        constexpr float mean[3] = {0.485f, 0.456f, 0.406f};
+        constexpr float deviation[3] = {0.229f, 0.224f, 0.225f};
+        inferbridge::native_harness::metal::Request texture_request;
+        texture_request.input_texture = request.shared_texture_handle;
+        texture_request.input_width = request.width;
+        texture_request.input_height = request.height;
+        texture_request.input_format = request.rgba
+            ? inferbridge::native_harness::metal::PixelFormat::rgba8
+            : inferbridge::native_harness::metal::PixelFormat::bgra8;
+        texture_request.reverse_channels = true;
+        texture_request.wait_event = request.wait_fence_handle;
+        texture_request.wait_value = request.wait_fence_value;
+        texture_request.output_texture = request.output_texture_handle;
+        texture_request.output_width = request.output_width;
+        texture_request.output_height = request.output_height;
+        texture_request.signal_event = request.signal_fence_handle;
+        texture_request.signal_value = request.signal_fence_value;
+        std::lock_guard<std::mutex> lock(mutex_);
+        @autoreleasepool {
+            auto prepared = texture_pipeline_->prepare(texture_request,
+                network.width, network.height, mean, deviation);
+            Plan& plan = get_presentation_plan(network.width, network.height);
+            prepared.input_data = [[MPSGraphTensorData alloc]
+                initWithMTLBuffer:prepared.input_buffer
+                shape:shape({1, 3, network.height, network.width})
+                dataType:MPSDataTypeFloat32];
+            prepared.output_data = [[MPSGraphTensorData alloc]
+                initWithMTLBuffer:prepared.output_buffer
+                shape:shape({1, 1, network.height, network.width})
+                dataType:MPSDataTypeFloat32];
+            MPSGraphExecutableExecutionDescriptor* descriptor =
+                [MPSGraphExecutableExecutionDescriptor new];
+            descriptor.waitUntilCompleted = NO;
+            NSArray<MPSGraphTensorData*>* results = [plan.executable
+                runAsyncWithMTLCommandQueue:texture_pipeline_->queue()
+                inputsArray:@[prepared.input_data]
+                resultsArray:@[prepared.output_data]
+                executionDescriptor:descriptor];
+            if (results.count != 1u)
+                throw std::runtime_error("MiDaS Metal output binding failed");
+            return std::make_shared<MetalExternalJob>(
+                texture_pipeline_->finish(prepared,
+                    network.width, network.height, true));
+        }
+    }
+
 private:
     Plan& get_plan(int width, int height) {
         const std::uint64_t key = (std::uint64_t(width) << 32u) |
@@ -321,6 +413,34 @@ private:
             .first->second;
     }
 
+    Plan& get_presentation_plan(int width, int height) {
+        const std::uint64_t key = (1ull << 63u) |
+            (std::uint64_t(width) << 32u) |
+            static_cast<std::uint32_t>(height);
+        auto found = plans_.find(key);
+        if (found != plans_.end()) return found->second;
+        GraphBuilder builder(model_, width, height, fp16_);
+        builder.build_presentation();
+        MPSGraphShapedType* input_type = [[MPSGraphShapedType alloc]
+            initWithShape:shape({1, 3, height, width})
+            dataType:MPSDataTypeFloat32];
+        MPSGraphCompilationDescriptor* descriptor =
+            [MPSGraphCompilationDescriptor new];
+        descriptor.optimizationLevel = MPSGraphOptimizationLevel1;
+        descriptor.waitForCompilationCompletion = YES;
+        MPSGraphExecutable* executable = [builder.graph()
+            compileWithDevice:graph_device_ feeds:@{builder.input(): input_type}
+            targetTensors:@[builder.output()] targetOperations:nil
+            compilationDescriptor:descriptor];
+        if (executable == nil)
+            throw std::runtime_error(
+                "failed to compile MiDaS Metal presentation graph");
+        executable.options = MPSGraphOptionsSynchronizeResults;
+        return plans_.emplace(
+            key, Plan{builder.graph(), builder.input(), executable})
+            .first->second;
+    }
+
     ModelFile model_;
     bool fp16_ = false;
     id<MTLDevice> device_ = nil;
@@ -328,6 +448,8 @@ private:
     MPSGraphDevice* graph_device_ = nil;
     std::unordered_map<std::uint64_t, Plan> plans_;
     std::mutex mutex_;
+    std::unique_ptr<inferbridge::native_harness::metal::TexturePipeline>
+        texture_pipeline_;
 };
 
 MetalExecutor::MetalExecutor(const std::string& path)
@@ -337,6 +459,11 @@ void MetalExecutor::infer(const float* input, std::uint32_t width,
                           std::uint32_t height, float* depth,
                           std::uint64_t depth_elements) {
     implementation_->infer(input, width, height, depth, depth_elements);
+}
+
+std::shared_ptr<ExternalJob> MetalExecutor::submit_texture(
+    const ExternalTextureRequest& request) {
+    return implementation_->submit_texture(request);
 }
 
 }  // namespace midas_native

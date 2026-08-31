@@ -8,6 +8,7 @@
 #if defined(MIDAS_WITH_METAL)
 #  include "metal_executor.h"
 #endif
+#include "midas_internal.h"
 
 #include <algorithm>
 #include <memory>
@@ -81,6 +82,22 @@ midas_status protect(Function&& function) {
     }
 }
 }
+
+namespace midas_native {
+
+std::shared_ptr<ExternalJob> submit_external_texture(
+    midas_context* context, const ExternalTextureRequest& request) {
+    if (context == nullptr)
+        throw std::invalid_argument("MiDaS context is null");
+#if defined(MIDAS_WITH_METAL)
+    if (context->metal_executor)
+        return context->metal_executor->submit_texture(request);
+#endif
+    throw std::invalid_argument(
+        "MiDaS context does not support external texture submission");
+}
+
+}  // namespace midas_native
 
 extern "C" {
 
