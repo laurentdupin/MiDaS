@@ -32,15 +32,33 @@ static int parse_u32(const char* text, uint32_t* value) {
     return 1;
 }
 
+static int parse_u32_allow_zero(const char* text, uint32_t* value) {
+    char* end = NULL;
+    const unsigned long parsed = strtoul(text, &end, 10);
+    if (text == end || *end != '\0' || parsed > UINT32_MAX)
+        return 0;
+    *value = (uint32_t)parsed;
+    return 1;
+}
+
+static int compare_double(const void* left, const void* right) {
+    const double a = *(const double*)left;
+    const double b = *(const double*)right;
+    return (a > b) - (a < b);
+}
+
 int main(int argc, char** argv) {
-    if (argc != 6) {
+    if (argc != 6 && argc != 7) {
         fprintf(stderr,
-            "usage: %s MODEL WIDTH HEIGHT WARMUP ITERATIONS\n", argv[0]);
+            "usage: %s MODEL WIDTH HEIGHT WARMUP ITERATIONS [GPU_DEVICE]\n",
+            argv[0]);
         return 2;
     }
     uint32_t width = 0, height = 0, warmup = 0, iterations = 0;
+    uint32_t gpu_device = 0;
     if (!parse_u32(argv[2], &width) || !parse_u32(argv[3], &height) ||
         !parse_u32(argv[4], &warmup) || !parse_u32(argv[5], &iterations) ||
+        (argc == 7 && !parse_u32_allow_zero(argv[6], &gpu_device)) ||
         (width % 32u) != 0u || (height % 32u) != 0u) {
         fprintf(stderr, "dimensions must be positive multiples of 32\n");
         return 2;
@@ -48,7 +66,8 @@ int main(int argc, char** argv) {
     const uint64_t pixels = (uint64_t)width * height;
     float* input = (float*)malloc((size_t)pixels * 3u * sizeof(float));
     float* output = (float*)malloc((size_t)pixels * sizeof(float));
-    if (!input || !output) return 3;
+    double* samples = (double*)malloc((size_t)iterations * sizeof(double));
+    if (!input || !output || !samples) return 3;
     for (uint64_t i = 0; i < pixels * 3u; ++i)
         input[i] = ((float)((i * 1103515245u + 12345u) & 1023u) / 1023.0f
             - 0.5f) * 2.0f;
@@ -60,7 +79,7 @@ int main(int argc, char** argv) {
         argv[1], MIDAS_MODEL_V21_SMALL_256, &context);
 #else
     midas_status status = midas_create_vulkan(
-        argv[1], MIDAS_MODEL_V21_SMALL_256, 0, &context);
+        argv[1], MIDAS_MODEL_V21_SMALL_256, gpu_device, &context);
 #endif
     const double load_ms = now_ms() - load_begin;
     if (status != MIDAS_STATUS_OK) {
@@ -86,9 +105,14 @@ int main(int argc, char** argv) {
             return 6;
         }
         total_ms += elapsed;
+        samples[i] = elapsed;
         if (elapsed < minimum_ms) minimum_ms = elapsed;
         if (elapsed > maximum_ms) maximum_ms = elapsed;
     }
+    qsort(samples, iterations, sizeof(double), compare_double);
+    const double median_ms = (iterations & 1u)
+        ? samples[iterations / 2u]
+        : (samples[iterations / 2u - 1u] + samples[iterations / 2u]) * 0.5;
     float output_min = INFINITY, output_max = -INFINITY;
     double output_sum = 0.0;
     for (uint64_t i = 0; i < pixels; ++i) {
@@ -97,13 +121,15 @@ int main(int argc, char** argv) {
         output_sum += output[i];
     }
     const double mean_ms = total_ms / iterations;
-    printf("load_ms=%.3f width=%u height=%u warmup=%u iterations=%u "
-           "mean_ms=%.3f min_ms=%.3f max_ms=%.3f fps=%.3f "
+    printf("load_ms=%.3f gpu_device=%u width=%u height=%u warmup=%u "
+           "iterations=%u mean_ms=%.3f median_ms=%.3f min_ms=%.3f "
+           "max_ms=%.3f fps=%.3f "
            "output_min=%.9g output_max=%.9g output_mean=%.9g\n",
-        load_ms, width, height, warmup, iterations,
-        mean_ms, minimum_ms, maximum_ms, 1000.0 / mean_ms,
+        load_ms, gpu_device, width, height, warmup, iterations,
+        mean_ms, median_ms, minimum_ms, maximum_ms, 1000.0 / median_ms,
         output_min, output_max, output_sum / (double)pixels);
     midas_destroy(context);
+    free(samples);
     free(output);
     free(input);
     return 0;

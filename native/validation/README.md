@@ -141,3 +141,24 @@ capture preprocessing and output readback/quantization remain host
 boundaries. External GPU resources, async execution, and cancellation are not
 advertised. The Windows Release ABI, image, metadata, and real full-graph
 harness tests all pass.
+
+## Windows Vulkan optimization gate (2026-09-04)
+
+The packed-INT8 3x3 convolution now shares a 16x8 activation tile across four
+output channels. This replaces the former one-output-channel workgroups and
+removes most repeated global activation traffic without requiring cooperative
+matrix extensions. FP32 and FP16 retain their existing portable kernels.
+
+Strict old-DLL/new-DLL comparisons produced bit-identical FP32 depth tensors
+for FP32, FP16, and INT8 on both test adapters at 256x160, 256x256, and
+320x192. Median INT8 tensor-graph latency changed as follows:
+
+| Adapter | 256x128 | 256x160 | 256x256 | 320x192 |
+|---|---:|---:|---:|---:|
+| RTX 4060 Laptop | 22.243 -> 14.269 ms | 26.157 -> 15.325 ms | 35.410 -> 18.418 ms | 34.796 -> 18.447 ms |
+| Radeon 780M | 14.335 -> 10.135 ms | 17.785 -> 11.448 ms | 26.299 -> 14.889 ms | 25.462 -> 14.990 ms |
+
+The updated payload also passed Deep Desktop's GPU-resident D3D12 path from a
+1920x1080 source at the standard 256 bound. Median submit-to-output latency
+was 8.507/9.439/8.114 ms on the RTX 4060 and 22.091/21.984/20.396 ms on the
+Radeon 780M for FP32/FP16/INT8 respectively.

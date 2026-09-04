@@ -225,7 +225,8 @@ void VulkanOperators::conv3x3_int8(
         {&output, &packed_input, &packed_weight, &input_scale,
          &weight_scales, &bias},
         &convolution, sizeof(convolution),
-        divide_up(width, 8u), divide_up(height, 8u), output_channels);
+        divide_up(width, 16u), divide_up(height, 8u),
+        divide_up(output_channels, 4u));
 }
 
 void VulkanOperators::conv(

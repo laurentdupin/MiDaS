@@ -90,13 +90,18 @@ if(MIDAS_WITH_VULKAN)
     midas_compile_shader(resize_depth_buffer)
     midas_compile_shader(reduce_minmax)
     midas_compile_shader(normalize_relative)
-    foreach(SHARED_SHADER reduce_absmax quantize_nchw_int8 conv2d_spatial_int8)
+    foreach(SHARED_SHADER reduce_absmax quantize_nchw_int8)
         inferbridge_compile_native_support_shader(
             NAME "${SHARED_SHADER}" PREFIX midas
             GENERATED_DIR "${MIDAS_GENERATED_DIR}"
             EMBED_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
             OUT_VAR MIDAS_SHADER_HEADERS)
     endforeach()
+    inferbridge_compile_native_support_shader(
+        NAME conv2d_spatial_int8 SOURCE_NAME conv2d_spatial_int8_tiled
+        PREFIX midas GENERATED_DIR "${MIDAS_GENERATED_DIR}"
+        EMBED_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
+        OUT_VAR MIDAS_SHADER_HEADERS)
 endif()
 
 add_library(midas_native SHARED
