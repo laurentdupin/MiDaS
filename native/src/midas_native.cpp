@@ -423,3 +423,5 @@ midas_status MIDAS_CALL midas_infer_tensor_f32(
 }
 
 }
+
+#include "linux_capture.inl"
