@@ -25,8 +25,8 @@
 #include <vector>
 
 namespace { class MidasHostWorker; }
-class MidasMetalWorker;
-struct MidasMetalAdmission;
+class MidasGpuWorker;
+struct MidasGpuAdmission;
 
 struct ibrh_runtime {
     std::string error;
@@ -46,9 +46,9 @@ struct ibrh_model {
     std::shared_ptr<MidasHostWorker> host_worker;
     std::shared_ptr<std::atomic<uint32_t>> host_admissions =
         std::make_shared<std::atomic<uint32_t>>(0u);
-#if defined(MIDAS_WITH_METAL) && defined(__APPLE__)
-    std::shared_ptr<MidasMetalWorker> metal_worker;
-    std::shared_ptr<std::atomic<uint32_t>> metal_admissions =
+#if (defined(MIDAS_WITH_METAL) && defined(__APPLE__)) || (defined(MIDAS_WITH_VULKAN) && defined(_WIN32))
+    std::shared_ptr<MidasGpuWorker> gpu_worker;
+    std::shared_ptr<std::atomic<uint32_t>> gpu_admissions =
         std::make_shared<std::atomic<uint32_t>>(0u);
 #endif
     std::mutex submit_mutex;
@@ -59,10 +59,10 @@ struct ibrh_job {
     std::atomic<uint32_t> state{IBRH_JOB_QUEUED};
     std::atomic<bool> cancel_requested{false};
     std::shared_ptr<midas_native::ExternalJob> gpu_job;
-#if defined(MIDAS_WITH_METAL) && defined(__APPLE__)
+#if (defined(MIDAS_WITH_METAL) && defined(__APPLE__)) || (defined(MIDAS_WITH_VULKAN) && defined(_WIN32))
     mutable std::mutex gpu_mutex;
-    std::shared_ptr<MidasMetalAdmission> metal_admission;
-    std::weak_ptr<MidasMetalWorker> metal_worker;
+    std::shared_ptr<MidasGpuAdmission> gpu_admission;
+    std::weak_ptr<MidasGpuWorker> gpu_worker;
     midas_native::ExternalTextureRequest texture_request{};
 #endif
     uint64_t source_frame_id = 0u;
@@ -71,9 +71,7 @@ struct ibrh_job {
     uint32_t height = 0u;
     std::shared_ptr<std::atomic<uint32_t>> admission;
     std::vector<uint8_t> depth;
-    ~ibrh_job() {
-        if (admission) admission->fetch_sub(1u);
-    }
+    ~ibrh_job();
 };
 
 
@@ -353,19 +351,19 @@ private:
 
 }  // namespace
 
-#if defined(MIDAS_WITH_METAL) && defined(__APPLE__)
-struct MidasMetalAdmission {
-    explicit MidasMetalAdmission(std::shared_ptr<std::atomic<uint32_t>> value)
+#if (defined(MIDAS_WITH_METAL) && defined(__APPLE__)) || (defined(MIDAS_WITH_VULKAN) && defined(_WIN32))
+struct MidasGpuAdmission {
+    explicit MidasGpuAdmission(std::shared_ptr<std::atomic<uint32_t>> value)
         : count(std::move(value)) {}
-    ~MidasMetalAdmission() { count->fetch_sub(1u); }
+    ~MidasGpuAdmission() { count->fetch_sub(1u); }
     std::shared_ptr<std::atomic<uint32_t>> count;
 };
 
-class MidasMetalWorker {
+class MidasGpuWorker {
 public:
-    explicit MidasMetalWorker(midas_context* context)
-        : context_(context), thread_([this] { run(); }) {}
-    ~MidasMetalWorker() { stop(); }
+    explicit MidasGpuWorker(ibrh_model* model)
+        : model_(model), thread_([this] { run(); }) {}
+    ~MidasGpuWorker() { stop(); }
 
     void enqueue(ibrh_job* job) {
         retain_job(job);
@@ -373,13 +371,20 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             if (stopping_) {
                 release_job(job);
-                throw std::runtime_error("MiDaS Metal worker is stopping");
+                throw std::runtime_error("MiDaS GPU worker is stopping");
             }
             queue_.push_back(job);
         }
         condition_.notify_one();
     }
 
+    void retire(std::shared_ptr<midas_native::ExternalJob> job) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!exited_) retired_.push_back(std::move(job));
+        }
+        condition_.notify_one();
+    }
     bool cancel_queued(ibrh_job* job) {
         bool removed = false;
         {
@@ -419,13 +424,16 @@ private:
     void run() {
         for (;;) {
             ibrh_job* job = nullptr;
+            std::deque<std::shared_ptr<midas_native::ExternalJob>> retired;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
-                condition_.wait(lock, [&] { return stopping_ || !queue_.empty(); });
-                if (stopping_ && queue_.empty()) return;
-                job = queue_.front();
-                queue_.pop_front();
+                condition_.wait(lock, [&] { return stopping_ || !queue_.empty() || !retired_.empty(); });
+                if (stopping_ && queue_.empty() && retired_.empty()) { exited_ = true; return; }
+                retired.swap(retired_);
+                if (!queue_.empty()) { job = queue_.front(); queue_.pop_front(); }
             }
+            retired.clear();
+            if (!job) continue;
             if (job->cancel_requested.load()) {
                 job->state.store(IBRH_JOB_CANCELLED);
                 release_job(job);
@@ -433,10 +441,15 @@ private:
             }
             job->state.store(IBRH_JOB_RUNNING);
             try {
-                auto native = midas_native::submit_external_texture(
-                    context_, job->texture_request);
-                std::lock_guard<std::mutex> lock(job->gpu_mutex);
-                job->gpu_job = std::move(native);
+#if defined(MIDAS_WITH_VULKAN) && defined(_WIN32)
+                auto native = model_->external_gpu->submit_texture(job->texture_request);
+#else
+                auto native = midas_native::submit_external_texture(model_->context, job->texture_request);
+#endif
+                {
+                    std::lock_guard<std::mutex> lock(job->gpu_mutex);
+                    job->gpu_job = std::move(native);
+                }
             } catch (...) {
                 job->state.store(IBRH_JOB_FAILED);
             }
@@ -444,14 +457,27 @@ private:
         }
     }
 
-    midas_context* context_ = nullptr;
+    ibrh_model* model_ = nullptr;
     std::mutex mutex_;
     std::condition_variable condition_;
     std::deque<ibrh_job*> queue_;
+    std::deque<std::shared_ptr<midas_native::ExternalJob>> retired_;
+    bool exited_ = false;
     bool stopping_ = false;
     std::thread thread_;
 };
 #endif
+
+ibrh_job::~ibrh_job() {
+#if (defined(MIDAS_WITH_METAL) && defined(__APPLE__)) || (defined(MIDAS_WITH_VULKAN) && defined(_WIN32))
+    if (gpu_job) {
+        if (auto worker = gpu_worker.lock()) worker->retire(std::move(gpu_job));
+        else gpu_job.reset();
+    }
+    gpu_admission.reset();
+#endif
+    if (admission) admission->fetch_sub(1u);
+}
 
 namespace {
 
@@ -621,18 +647,27 @@ ibrh_result IBRH_CALL model_load(
         }
         model->host_worker = std::make_shared<MidasHostWorker>();
 #if defined(MIDAS_WITH_METAL) && defined(__APPLE__)
-        model->metal_worker = std::make_shared<MidasMetalWorker>(model->context);
+        model->gpu_worker = std::make_shared<MidasGpuWorker>(model);
 #endif
     }
+#if defined(MIDAS_WITH_VULKAN) && defined(_WIN32)
+    try {
+        if (model->external_gpu) model->gpu_worker = std::make_shared<MidasGpuWorker>(model);
+    } catch (const std::exception& error) {
+        midas_destroy(model->context);
+        delete model;
+        return fail(runtime, IBRH_ERROR_INTERNAL, error.what());
+    }
+#endif
     *output = model;
     return IBRH_OK;
 }
 
 void IBRH_CALL model_unload(ibrh_model* model) {
     if (model == nullptr) return;
-#if defined(MIDAS_WITH_METAL) && defined(__APPLE__)
-    if (model->metal_worker) model->metal_worker->stop();
-    model->metal_worker.reset();
+#if (defined(MIDAS_WITH_METAL) && defined(__APPLE__)) || (defined(MIDAS_WITH_VULKAN) && defined(_WIN32))
+    if (model->gpu_worker) model->gpu_worker->stop();
+    model->gpu_worker.reset();
 #endif
     model->host_worker.reset();
 #if defined(MIDAS_WITH_VULKAN)
@@ -727,9 +762,17 @@ ibrh_result IBRH_CALL submit(
             return IBRH_ERROR_UNSUPPORTED_CAPABILITY;
         auto* job = new (std::nothrow) ibrh_job();
         if (!job) return IBRH_ERROR_INTERNAL;
-        try {
-            std::lock_guard<std::mutex> lock(model->submit_mutex);
-            job->gpu_job = model->external_gpu->submit_texture({
+        uint32_t admitted = model->gpu_admissions->load();
+        // Three renderer-held results plus two active transport slots.
+        // The scheduler still bounds queued inference independently.
+        while (admitted < 5u && !model->gpu_admissions->compare_exchange_weak(admitted, admitted + 1u)) {}
+        if (admitted >= 5u) { delete job; return IBRH_ERROR_INVALID_STATE; }
+        try { job->gpu_admission = std::make_shared<MidasGpuAdmission>(model->gpu_admissions); }
+        catch (...) { model->gpu_admissions->fetch_sub(1u); delete job; return IBRH_ERROR_INTERNAL; }
+        job->source_frame_id = request->source_frame_id;
+        job->timestamp_ns = request->timestamp_ns;
+        job->width = input.width; job->height = input.height;
+        job->texture_request = {
                 static_cast<uintptr_t>(input.native_handle),
                 input.auxiliary_handle, input.width, input.height,
                 input.pixel_format == IBRH_PIXEL_RGBA8, network_size,
@@ -740,7 +783,10 @@ ibrh_result IBRH_CALL submit(
                 destination.width, destination.height,
                 static_cast<uintptr_t>(target.synchronization.native_handle),
                 target.synchronization.value,
-                request->source_frame_id, request->timestamp_ns});
+                request->source_frame_id, request->timestamp_ns};
+        try {
+            job->gpu_worker = model->gpu_worker;
+            model->gpu_worker->enqueue(job);
         } catch (const std::invalid_argument& error) {
             delete job; return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT, error.what());
         } catch (const std::exception& error) {
@@ -774,21 +820,21 @@ ibrh_result IBRH_CALL submit(
             signal.native_handle_type != IBRH_NATIVE_HANDLE_METAL_SHARED_EVENT ||
             signal.native_handle == 0u || signal.value == 0u)
             return IBRH_ERROR_UNSUPPORTED_CAPABILITY;
-        uint32_t admitted = model->metal_admissions->load();
+        uint32_t admitted = model->gpu_admissions->load();
         while (admitted < 3u &&
-               !model->metal_admissions->compare_exchange_weak(
+               !model->gpu_admissions->compare_exchange_weak(
                    admitted, admitted + 1u)) {}
         if (admitted >= 3u) return IBRH_ERROR_INVALID_STATE;
         auto* job = new (std::nothrow) ibrh_job();
         if (job == nullptr) {
-            model->metal_admissions->fetch_sub(1u);
+            model->gpu_admissions->fetch_sub(1u);
             return IBRH_ERROR_INTERNAL;
         }
         try {
-            job->metal_admission = std::make_shared<MidasMetalAdmission>(
-                model->metal_admissions);
+            job->gpu_admission = std::make_shared<MidasGpuAdmission>(
+                model->gpu_admissions);
         } catch (...) {
-            model->metal_admissions->fetch_sub(1u);
+            model->gpu_admissions->fetch_sub(1u);
             delete job;
             return IBRH_ERROR_INTERNAL;
         }
@@ -807,8 +853,8 @@ ibrh_result IBRH_CALL submit(
             static_cast<uintptr_t>(signal.native_handle), signal.value,
             request->source_frame_id, request->timestamp_ns};
         try {
-            job->metal_worker = model->metal_worker;
-            model->metal_worker->enqueue(job);
+            job->gpu_worker = model->gpu_worker;
+            model->gpu_worker->enqueue(job);
         } catch (...) {
             delete job;
             return IBRH_ERROR_INVALID_STATE;
@@ -885,7 +931,7 @@ ibrh_result IBRH_CALL job_poll(
     *status = {};
     status->struct_size = sizeof(*status);
     std::shared_ptr<midas_native::ExternalJob> gpu_job;
-#if defined(MIDAS_WITH_METAL) && defined(__APPLE__)
+#if (defined(MIDAS_WITH_METAL) && defined(__APPLE__)) || (defined(MIDAS_WITH_VULKAN) && defined(_WIN32))
     {
         std::lock_guard<std::mutex> lock(job->gpu_mutex);
         gpu_job = job->gpu_job;
@@ -915,9 +961,9 @@ ibrh_result IBRH_CALL job_poll(
 ibrh_result IBRH_CALL job_cancel(ibrh_job* job) {
     if (job == nullptr) return IBRH_ERROR_INVALID_ARGUMENT;
     std::shared_ptr<midas_native::ExternalJob> gpu_job;
-#if defined(MIDAS_WITH_METAL) && defined(__APPLE__)
+#if (defined(MIDAS_WITH_METAL) && defined(__APPLE__)) || (defined(MIDAS_WITH_VULKAN) && defined(_WIN32))
     job->cancel_requested.store(true);
-    if (auto worker = job->metal_worker.lock();
+    if (auto worker = job->gpu_worker.lock();
         worker && worker->cancel_queued(job)) return IBRH_OK;
     {
         std::lock_guard<std::mutex> lock(job->gpu_mutex);
