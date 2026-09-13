@@ -1,3 +1,4 @@
+#include <inferbridge/native_harness_json.h>
 
 #include "inferbridge_harness.h"
 
@@ -99,17 +100,7 @@ bool valid_string(ibrh_string_view value) {
 
 bool json_string(
     const std::string& json, const std::string& key, std::string& value) {
-    const std::string marker = "\"" + key + "\"";
-    size_t position = json.find(marker);
-    if (position == std::string::npos) return false;
-    position = json.find(':', position + marker.size());
-    if (position == std::string::npos) return false;
-    position = json.find_first_not_of(" \t\r\n", position + 1u);
-    if (position == std::string::npos || json[position] != '"') return false;
-    const size_t end = json.find('"', position + 1u);
-    if (end == std::string::npos) return false;
-    value = json.substr(position + 1u, end - position - 1u);
-    return true;
+    return inferbridge::harness_json::string_member(json, key, value);
 }
 
 bool json_uint(
@@ -299,18 +290,10 @@ private:
             normalized.data(), normalized.size());
         if (result != MIDAS_STATUS_OK)
             throw std::runtime_error(midas_last_error());
-        for (uint32_t y = 0; y < work.height; ++y) {
-            const uint32_t source_y = y * static_cast<uint32_t>(shape.height) /
-                work.height;
-            for (uint32_t x = 0; x < work.width; ++x) {
-                const uint32_t source_x = x * static_cast<uint32_t>(shape.width) /
-                    work.width;
-                work.destination[
-                    static_cast<uint64_t>(y) * work.destination_stride + x] =
-                    normalized[static_cast<uint64_t>(source_y) * shape.width +
-                        source_x] / 255.0f;
-            }
-        }
+        for (uint32_t y=0; y<uint32_t(shape.height); ++y)
+            for (uint32_t x=0; x<uint32_t(shape.width); ++x)
+                work.destination[uint64_t(y)*work.destination_stride+x] =
+                    normalized[uint64_t(y)*shape.width+x]/255.0f;
     }
 
     void run() {
@@ -719,8 +702,11 @@ ibrh_result IBRH_CALL model_plan_outputs(
     const auto result = model_get_port(model, IBRH_PORT_OUTPUT, 0u,
                                        sizeof(outputs[0]), &outputs[0]);
     if (result != IBRH_OK) return result;
-    outputs[0].width = request->inputs[0].width;
-    outputs[0].height = request->inputs[0].height;
+    uint32_t resolution=model->input_size;
+    if(!input_size(copy_string(request->parameters_json),resolution,resolution))return IBRH_ERROR_INVALID_ARGUMENT;
+    midas_image_shape shape{};
+    if(midas_get_network_shape(request->inputs[0].width,request->inputs[0].height,resolution,&shape)!=MIDAS_STATUS_OK)return IBRH_ERROR_INVALID_ARGUMENT;
+    outputs[0].width=shape.width;outputs[0].height=shape.height;
     outputs[0].flags = 0u;
     return IBRH_OK;
 }
@@ -745,8 +731,10 @@ ibrh_result IBRH_CALL submit(
     if (!input_size(copy_string(request->parameters_json), network_size, network_size))
         return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
                     "MiDaS Size must be an integer from 1 to 4096");
-    if (!input.width || !input.height || destination.width != input.width ||
-        destination.height != input.height ||
+    midas_image_shape planned{};
+    if(midas_get_network_shape(input.width,input.height,network_size,&planned)!=MIDAS_STATUS_OK)return IBRH_ERROR_INVALID_ARGUMENT;
+    if (!input.width || !input.height || destination.width != uint32_t(planned.width) ||
+        destination.height != uint32_t(planned.height) ||
         destination.pixel_format != IBRH_PIXEL_DEPTH_FLOAT32)
         return IBRH_ERROR_INVALID_ARGUMENT;
 #if defined(MIDAS_WITH_VULKAN) && defined(_WIN32)
@@ -771,7 +759,7 @@ ibrh_result IBRH_CALL submit(
         catch (...) { model->gpu_admissions->fetch_sub(1u); delete job; return IBRH_ERROR_INTERNAL; }
         job->source_frame_id = request->source_frame_id;
         job->timestamp_ns = request->timestamp_ns;
-        job->width = input.width; job->height = input.height;
+        job->width = destination.width; job->height = destination.height;
         job->texture_request = {
                 static_cast<uintptr_t>(input.native_handle),
                 input.auxiliary_handle, input.width, input.height,
@@ -794,7 +782,7 @@ ibrh_result IBRH_CALL submit(
         }
         job->source_frame_id = request->source_frame_id;
         job->timestamp_ns = request->timestamp_ns;
-        job->width = input.width; job->height = input.height;
+        job->width = destination.width; job->height = destination.height;
         *output = job; return IBRH_OK;
     }
 #endif
@@ -840,8 +828,8 @@ ibrh_result IBRH_CALL submit(
         }
         job->source_frame_id = request->source_frame_id;
         job->timestamp_ns = request->timestamp_ns;
-        job->width = input.width;
-        job->height = input.height;
+        job->width = destination.width;
+        job->height = destination.height;
         job->state.store(IBRH_JOB_QUEUED);
         job->texture_request = {
             static_cast<uintptr_t>(input.native_handle), input.auxiliary_handle,
@@ -905,7 +893,7 @@ ibrh_result IBRH_CALL submit(
     job->admission = model->host_admissions;
     job->source_frame_id = request->source_frame_id;
     job->timestamp_ns = request->timestamp_ns;
-    job->width = input.width; job->height = input.height;
+    job->width = destination.width; job->height = destination.height;
     if (!model->host_worker || !model->host_worker->enqueue({
             job, model->context, bgra, input.width, input.height,
             input.row_stride_bytes, input.pixel_format == IBRH_PIXEL_RGBA8,

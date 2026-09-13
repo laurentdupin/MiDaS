@@ -142,8 +142,8 @@ public:
         if (!request.shared_texture_handle || !request.wait_fence_handle ||
             !request.output_texture_handle || !request.signal_fence_handle ||
             !request.width || !request.height || !request.input_size ||
-            request.output_width != request.width ||
-            request.output_height != request.height) {
+            !request.output_width ||
+            !request.output_height) {
             throw std::invalid_argument("invalid MiDaS GPU texture request");
         }
         const ImageShape shape = network_shape(
