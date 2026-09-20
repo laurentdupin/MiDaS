@@ -1,3 +1,4 @@
+#include "inferbridge/native_harness_queue_priority.h"
 #include <inferbridge/native_harness_json.h>
 
 #include "inferbridge_harness.h"
@@ -575,6 +576,7 @@ ibrh_result IBRH_CALL model_load(
             "MiDaS model path is missing");
     const std::string path = copy_string(request->model_path);
     const std::string parameters = copy_string(request->parameters_json);
+    const inferbridge::native_harness::ScopedQueuePriorityRequest queue_priority_scope(parameters);
     const inferbridge::native::ScopedPrecisionRequest precision_scope(
         inferbridge::native::precision_from_parameters_json(parameters));
     std::string weights;
