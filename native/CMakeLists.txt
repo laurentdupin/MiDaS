@@ -22,6 +22,10 @@ option(MIDAS_WITH_METAL "Build the Apple Metal/MPSGraph executor" ${APPLE})
 
 if(MIDAS_WITH_VULKAN)
     find_package(Vulkan REQUIRED COMPONENTS glslc)
+    inferbridge_prepare_vulkan_shaders(
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/shared_shaders.cmake"
+        INFERBRIDGE_MODEL_SHADER_DIR)
     set(MIDAS_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
     file(MAKE_DIRECTORY "${MIDAS_GENERATED_DIR}")
 
@@ -35,7 +39,7 @@ if(MIDAS_WITH_VULKAN)
             list(APPEND EXTRA_ARGUMENTS "${ARGV2}")
         endif()
         set(SOURCE
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${SOURCE_NAME}.glsl")
+            "${INFERBRIDGE_MODEL_SHADER_DIR}/${SOURCE_NAME}.glsl")
         set(SPIRV "${MIDAS_GENERATED_DIR}/${NAME}.spv")
         set(HEADER "${MIDAS_GENERATED_DIR}/${NAME}_spv.h")
         add_custom_command(
@@ -44,7 +48,7 @@ if(MIDAS_WITH_VULKAN)
                 --target-env=vulkan1.3 --target-spv=spv1.6 -Werror
                 ${EXTRA_ARGUMENTS}
                 -o "${SPIRV}" "${SOURCE}"
-            DEPENDS "${SOURCE}"
+            DEPENDS "${SOURCE}" ${INFERBRIDGE_MODEL_SHADER_DEPENDENCIES}
             VERBATIM)
         add_custom_command(
             OUTPUT "${HEADER}"
